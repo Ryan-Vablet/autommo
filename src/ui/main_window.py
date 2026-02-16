@@ -13,10 +13,10 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QKeySequence
+from PyQt6.QtGui import QImage, QPixmap, QKeySequence, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,6 +60,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._config = config
         self._listening_slot_index: Optional[int] = None
+        self._slots_recalibrated: set[int] = set()  # slots with baseline changed this session (show bold)
+        self._before_save_callback: Optional[Callable[[], None]] = None
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(760, 400)
 
@@ -314,10 +316,15 @@ class MainWindow(QMainWindow):
         self._preview_label.setPixmap(scaled)
 
     def _apply_slot_button_style(
-        self, btn: QPushButton, state: str, keybind: str, cooldown_remaining: Optional[float] = None
+        self,
+        btn: QPushButton,
+        state: str,
+        keybind: str,
+        cooldown_remaining: Optional[float] = None,
+        slot_index: int = -1,
     ) -> None:
-        """Set slot button text and background color by state. Skip if this slot is listening."""
-        idx = self._slot_buttons.index(btn) if btn in self._slot_buttons else -1
+        """Set slot button text, color, and bold if baseline was recalibrated. Skip if this slot is listening."""
+        idx = self._slot_buttons.index(btn) if btn in self._slot_buttons else slot_index
         if idx >= 0 and self._listening_slot_index == idx:
             return  # Keep blue while listening
         display_key = keybind if keybind else "?"
@@ -334,6 +341,9 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(
             f"background-color: {color}; color: white; border: 1px solid #444; padding: 4px;"
         )
+        font = btn.font()
+        font.setBold(idx >= 0 and idx in self._slots_recalibrated)
+        btn.setFont(font)
 
     def _show_slot_menu(self, slot_index: int) -> None:
         """Show context menu above the slot button with Bind Key and Calibrate This Slot."""
@@ -369,7 +379,7 @@ class MainWindow(QMainWindow):
         if idx < len(self._slot_buttons):
             keybind = self._config.keybinds[idx] if idx < len(self._config.keybinds) else "?"
             self._apply_slot_button_style(
-                self._slot_buttons[idx], "unknown", keybind or "?"
+                self._slot_buttons[idx], "unknown", keybind or "?", slot_index=idx
             )
 
     def keyPressEvent(self, event) -> None:
@@ -389,7 +399,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().clearMessage()
                 if idx < len(self._slot_buttons):
                     self._apply_slot_button_style(
-                        self._slot_buttons[idx], "unknown", key_str
+                        self._slot_buttons[idx], "unknown", key_str, slot_index=idx
                     )
                 self.config_changed.emit(self._config)
             event.accept()
@@ -426,15 +436,34 @@ class MainWindow(QMainWindow):
             keybind = keybind or "?"
             state = s.get("state", "unknown")
             cd = s.get("cooldown_remaining")
-            self._apply_slot_button_style(btn, state, keybind, cd)
+            self._apply_slot_button_style(btn, state, keybind, cd, slot_index=s["index"])
+
+    def set_before_save_callback(self, callback: Optional[Callable[[], None]]) -> None:
+        """Set a callback run before writing config (e.g. to sync baselines from analyzer)."""
+        self._before_save_callback = callback
+
+    def mark_slots_recalibrated(self, slot_indices: set[int]) -> None:
+        """Mark these slots as having recalibrated baselines (show label in bold)."""
+        self._slots_recalibrated |= slot_indices
+
+    def mark_slot_recalibrated(self, slot_index: int) -> None:
+        """Mark one slot as having a recalibrated baseline."""
+        self._slots_recalibrated.add(slot_index)
+
+    def clear_recalibrated_slots(self) -> None:
+        """Clear recalibrated set (e.g. after save so baselines match disk)."""
+        self._slots_recalibrated.clear()
 
     def _save_config(self) -> None:
         """Persist current config to JSON and show Saved ✓ feedback."""
         try:
+            if self._before_save_callback:
+                self._before_save_callback()
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_PATH, "w") as f:
                 json.dump(self._config.to_dict(), f, indent=2)
             logger.info(f"Config saved to {CONFIG_PATH}")
+            self.clear_recalibrated_slots()
             self._btn_save_config.setText("Saved ✓")
             QTimer.singleShot(2000, self._revert_save_config_button)
         except Exception as e:

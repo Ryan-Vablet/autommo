@@ -4,13 +4,14 @@ Wires together: screen capture → slot analysis → UI + overlay.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, QThread, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.capture import ScreenCapture
 from src.analysis import SlotAnalyzer
@@ -19,6 +20,27 @@ from src.overlay import CalibrationOverlay
 from src.ui import MainWindow
 
 import numpy as np
+
+
+def encode_baselines(baselines: dict[int, np.ndarray]) -> list[dict]:
+    """Encode baselines for JSON: list of {shape: [h, w], data: base64} in slot order."""
+    return [
+        {"shape": list(ary.shape), "data": base64.b64encode(ary.tobytes()).decode()}
+        for i in sorted(baselines.keys())
+        for ary in [baselines[i]]
+    ]
+
+
+def decode_baselines(data: list[dict]) -> dict[int, np.ndarray]:
+    """Decode baselines from config (list of {shape, data})."""
+    result = {}
+    for i, d in enumerate(data):
+        shape = d.get("shape")
+        b64 = d.get("data")
+        if shape and b64:
+            arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
+            result[i] = arr.reshape(shape).copy()
+    return result
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -106,9 +128,21 @@ def main() -> None:
 
     # --- Initialize components ---
     analyzer = SlotAnalyzer(config)
+    if config.slot_baselines:
+        try:
+            decoded = decode_baselines(config.slot_baselines)
+            if decoded:
+                analyzer.set_baselines(decoded)
+        except Exception as e:
+            logger.warning(f"Could not load saved baselines: {e}")
 
     # --- Main window ---
     window = MainWindow(config)
+
+    def sync_baselines_to_config() -> None:
+        config.slot_baselines = encode_baselines(analyzer.get_baselines())
+
+    window.set_before_save_callback(sync_baselines_to_config)
     # Short-lived mss on main thread for monitor list and overlay setup
     capture = ScreenCapture(monitor_index=config.monitor_index)
     capture.start()
@@ -170,6 +204,17 @@ def main() -> None:
         window._btn_calibrate.setStyleSheet("")
 
     def calibrate_baselines():
+        baselines = analyzer.get_baselines()
+        if baselines:
+            reply = QMessageBox.question(
+                window,
+                "Recalibrate all slots?",
+                "You already have baselines set. Recalibrate all slots? This will replace existing baselines.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         try:
             cap = ScreenCapture(monitor_index=config.monitor_index)
             cap.start()
@@ -177,6 +222,7 @@ def main() -> None:
             cap.stop()
             analyzer.calibrate_baselines(frame)
             logger.info("Baselines calibrated from current frame")
+            window.mark_slots_recalibrated(set(range(config.slot_count)))
             window._btn_calibrate.setText("Calibrated ✓")
             window._btn_calibrate.setStyleSheet("")
             QTimer.singleShot(2000, revert_calibrate_button)
@@ -195,6 +241,7 @@ def main() -> None:
             frame = cap.grab_region(config.bounding_box)
             cap.stop()
             analyzer.calibrate_single_slot(frame, slot_index)
+            window.mark_slot_recalibrated(slot_index)
             window.statusBar().showMessage(f"Slot {slot_index + 1} calibrated ✓")
             QTimer.singleShot(2000, window.statusBar().clearMessage)
         except Exception as e:

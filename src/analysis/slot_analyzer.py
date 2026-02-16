@@ -120,6 +120,15 @@ class SlotAnalyzer:
         self._baselines[slot_index] = self._get_brightness_channel(slot_img).copy()
         logger.info(f"Calibrated baseline for slot {slot_index}")
 
+    def get_baselines(self) -> dict[int, np.ndarray]:
+        """Return a copy of the current baselines (slot_index -> grayscale 2D array)."""
+        return {k: v.copy() for k, v in self._baselines.items()}
+
+    def set_baselines(self, baselines: dict[int, np.ndarray]) -> None:
+        """Load baselines from a previous session (e.g. from config)."""
+        self._baselines = {k: v.copy() for k, v in baselines.items()}
+        logger.info(f"Loaded {len(self._baselines)} slot baselines from config")
+
     def analyze_frame(self, frame: np.ndarray) -> ActionBarState:
         """Analyze a full action bar frame and return state for all slots.
 
