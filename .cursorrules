@@ -1,0 +1,88 @@
+# Cooldown Reader — Project Context & Rules
+
+## Project Overview
+A Python desktop app that reads MMO action bar cooldowns via screen capture and image analysis.
+It detects which abilities are ready, which are on cooldown, and (future) presses keys based on priority rules.
+
+## Architecture
+
+### Core Loop (target 20-30 FPS on captured region)
+```
+Screen Capture (mss, small region only)
+  → Slot Segmentation (crop each icon by computed pixel offsets from calibration)
+    → Per-slot analysis:
+        - Brightness/histogram delta vs baseline → cooldown yes/no
+        - Center region OCR (EasyOCR) → countdown timer number (if present)
+        - Top-right crop OCR → keybind label (one-time read)
+    → State dict per slot: { keybind, is_ready, cooldown_remaining, slot_index }
+      → UI visualization + (future) automation engine
+```
+
+### Module Responsibilities
+
+- **src/capture/screen_capture.py** — Uses `mss` to grab a screen region at high FPS. Takes a bounding box (top, left, width, height) and monitor index. Returns numpy arrays.
+
+- **src/analysis/slot_analyzer.py** — Takes a captured action bar image, segments it into individual icon slots (evenly spaced, with configurable slot count and gap pixels). For each slot, determines cooldown state.
+
+- **src/analysis/ocr_engine.py** — Wraps EasyOCR (or Tesseract fallback). Handles the preprocessing pipeline: crop → upscale 3-4x → threshold → OCR. Two modes: keybind reading (top-right corner of slot) and cooldown number reading (center of slot).
+
+- **src/overlay/calibration_overlay.py** — A transparent, always-on-top, click-through window (PyQt6) that draws a colored rectangle showing the current capture bounding box. Updates in real-time as the user adjusts values in the main UI. Must work over borderless-windowed games.
+
+- **src/ui/main_window.py** — PyQt6 main control panel. Contains:
+  - Monitor selector dropdown
+  - Bounding box controls (top/left/width/height spinboxes, or bottom/right)
+  - Live preview of what's being captured
+  - Per-slot state visualization (icon + ready/cooldown indicator + timer)
+  - (Future) Priority rule editor
+
+- **src/automation/key_sender.py** — (Future scope) Sends keypresses based on slot states and priority rules. Will use pynput or similar. Keep the interface clean so rules can be plugged in later.
+
+- **src/models/slot.py** — Dataclass for slot state: slot_index, keybind, is_ready, cooldown_remaining, last_updated, baseline_histogram.
+
+- **config/default_config.json** — Persisted calibration: monitor index, bounding box, slot count, slot gap pixels, polling rate.
+
+### Key Technical Decisions
+
+1. **Overlay approach**: PyQt6 frameless, transparent, always-on-top window with `Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowTransparentForInput`. Draw with QPainter. The overlay is NOT draggable — position is controlled numerically from the main UI panel.
+
+2. **Cooldown detection strategy (start simple, iterate)**:
+   - Phase 1: Average brightness comparison. Capture each slot in "ready" state as baseline. Compare current brightness — if significantly darker, it's on cooldown. This alone gets you 80% of the way.
+   - Phase 2: Add OCR for countdown numbers. Crop center region of slot, upscale, threshold, EasyOCR with allowlist='0123456789.'.
+   - Phase 3: (Optional) Histogram or template matching for more precision.
+
+3. **GCD detection**: Same visual as cooldown but ~1.5s duration. Needs fast polling. A slot that was ready → briefly dark → ready again within ~2s is a GCD, not a real cooldown. Consider a minimum cooldown threshold to distinguish.
+
+4. **OCR performance**: EasyOCR model loading is slow (~2-3s). Load once at startup, reuse the reader instance. For keybind labels, read once and cache. For countdown numbers, only OCR slots that are detected as "on cooldown" by the brightness check first — don't OCR every slot every frame.
+
+5. **Screen capture perf**: `mss` is fast but only capture the action bar region, never fullscreen. A ~400x50px region at 30fps is trivial.
+
+6. **Threading model**: Capture + analysis loop runs in a worker thread (QThread). UI updates via signals/slots. Overlay updates via signal too. Never block the Qt event loop with capture work.
+
+## Tech Stack
+- Python 3.11+
+- PyQt6 (UI + overlay)
+- mss (screen capture)
+- opencv-python (image processing)
+- numpy (pixel math)
+- easyocr (OCR, lazy-loaded)
+- pynput (future, key sending)
+- dataclasses + json for config
+
+## Coding Conventions
+- Type hints on all function signatures
+- Dataclasses for data structures
+- Logging via `logging` module, not print()
+- Config loaded from JSON, with runtime overrides
+- Signals/slots for all cross-thread communication (no shared mutable state)
+- Keep analysis pure-functional where possible: frame in → state out
+
+## What's Scaffolded vs TODO
+Scaffolded: Project structure, all module stubs, dataclasses, config schema, main entry point, requirements.
+TODO: All actual implementation. Start with screen_capture → slot_analyzer (brightness only) → main_window (basic controls + preview) → calibration_overlay. Add OCR second. Automation last.
+
+## Important Gotchas
+- EasyOCR downloads models on first run (~100MB). Handle gracefully.
+- On Windows, DPI scaling can mess up screen coordinates. Use `mss` monitor info which accounts for this, but test with scaling > 100%.
+- Always-on-top over true exclusive fullscreen doesn't work — document that borderless windowed is required.
+- Game fonts vary wildly. The keybind labels in the reference image are small and stylized. May need per-game OCR tuning or fallback to manual keybind entry.
+- Cooldown brightness threshold will need per-game tuning. Expose it as a config slider.

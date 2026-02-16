@@ -1,0 +1,26 @@
+{
+  "monitor_index": 1,
+  "bounding_box": {
+    "top": 900,
+    "left": 500,
+    "width": 400,
+    "height": 50
+  },
+  "slots": {
+    "count": 10,
+    "gap_pixels": 2,
+    "keybinds": []
+  },
+  "detection": {
+    "polling_fps": 20,
+    "brightness_threshold": 0.65,
+    "cooldown_min_duration_ms": 2000,
+    "ocr_enabled": true,
+    "ocr_allowlist": "0123456789."
+  },
+  "overlay": {
+    "border_color": "#00FF00",
+    "border_width": 2,
+    "enabled": true
+  }
+}
