@@ -1,26 +1,25 @@
 {
   "monitor_index": 1,
   "bounding_box": {
-    "top": 900,
-    "left": 500,
-    "width": 400,
-    "height": 50
+    "top": 854,
+    "left": 757,
+    "width": 410,
+    "height": 36
   },
   "slots": {
-    "count": 10,
-    "gap_pixels": 2,
+    "count": 11,
+    "gap_pixels": 0,
+    "padding": 2,
     "keybinds": []
   },
   "detection": {
     "polling_fps": 20,
-    "brightness_threshold": 0.65,
+    "brightness_threshold": 0.95,
     "cooldown_min_duration_ms": 2000,
-    "ocr_enabled": true,
-    "ocr_allowlist": "0123456789."
+    "ocr_enabled": true
   },
   "overlay": {
-    "border_color": "#00FF00",
-    "border_width": 2,
-    "enabled": true
+    "enabled": true,
+    "border_color": "#00FF00"
   }
 }

@@ -251,9 +251,23 @@ class MainWindow(QMainWindow):
             )
 
     def _save_config(self) -> None:
-        """Persist current config to JSON."""
-        # TODO: Serialize self._config back to dict and write to CONFIG_PATH
-        logger.info("Config save not yet implemented")
+        """Persist current config to JSON and show Saved ✓ feedback."""
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(self._config.to_dict(), f, indent=2)
+            logger.info(f"Config saved to {CONFIG_PATH}")
+            self._btn_save_config.setText("Saved ✓")
+            QTimer.singleShot(2000, self._revert_save_config_button)
+        except Exception as e:
+            logger.error(f"Config save failed: {e}")
+            self._btn_save_config.setText("Save failed")
+            self._btn_save_config.setStyleSheet("color: red;")
+            QTimer.singleShot(2000, self._revert_save_config_button)
+
+    def _revert_save_config_button(self) -> None:
+        self._btn_save_config.setText("Save Config")
+        self._btn_save_config.setStyleSheet("")
 
     def populate_monitors(self, monitors: list[dict]) -> None:
         """Fill the monitor dropdown with available monitors."""

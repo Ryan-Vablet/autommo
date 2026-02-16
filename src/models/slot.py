@@ -70,6 +70,10 @@ class BoundingBox:
             "height": self.height,
         }
 
+    def to_dict(self) -> dict:
+        """Serialize to dict for JSON config file."""
+        return {"top": self.top, "left": self.left, "width": self.width, "height": self.height}
+
 
 @dataclass
 class AppConfig:
@@ -102,3 +106,26 @@ class AppConfig:
             overlay_enabled=data.get("overlay", {}).get("enabled", True),
             overlay_border_color=data.get("overlay", {}).get("border_color", "#00FF00"),
         )
+
+    def to_dict(self) -> dict:
+        """Serialize to dict for JSON config file (round-trip with from_dict)."""
+        return {
+            "monitor_index": self.monitor_index,
+            "bounding_box": self.bounding_box.to_dict(),
+            "slots": {
+                "count": self.slot_count,
+                "gap_pixels": self.slot_gap_pixels,
+                "padding": self.slot_padding,
+                "keybinds": [],
+            },
+            "detection": {
+                "polling_fps": self.polling_fps,
+                "brightness_threshold": self.brightness_threshold,
+                "cooldown_min_duration_ms": self.cooldown_min_duration_ms,
+                "ocr_enabled": self.ocr_enabled,
+            },
+            "overlay": {
+                "enabled": self.overlay_enabled,
+                "border_color": self.overlay_border_color,
+            },
+        }
