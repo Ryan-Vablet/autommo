@@ -59,7 +59,11 @@ class CaptureWorker(QThread):
                         {
                             "index": s.index,
                             "state": s.state.value,
-                            "keybind": s.keybind,
+                            "keybind": (
+                                self._config.keybinds[s.index]
+                                if s.index < len(self._config.keybinds)
+                                else None
+                            ),
                             "cooldown_remaining": s.cooldown_remaining,
                             "brightness": s.brightness,
                         }
@@ -183,6 +187,22 @@ def main() -> None:
             QTimer.singleShot(2000, revert_calibrate_button)
 
     window._btn_calibrate.clicked.connect(calibrate_baselines)
+
+    def calibrate_single_slot(slot_index: int) -> None:
+        try:
+            cap = ScreenCapture(monitor_index=config.monitor_index)
+            cap.start()
+            frame = cap.grab_region(config.bounding_box)
+            cap.stop()
+            analyzer.calibrate_single_slot(frame, slot_index)
+            window.statusBar().showMessage(f"Slot {slot_index + 1} calibrated ✓")
+            QTimer.singleShot(2000, window.statusBar().clearMessage)
+        except Exception as e:
+            logger.error(f"Per-slot calibration failed: {e}")
+            window.statusBar().showMessage(f"Calibration failed: {e}")
+            QTimer.singleShot(2000, window.statusBar().clearMessage)
+
+    window.calibrate_slot_requested.connect(calibrate_single_slot)
 
     # --- Run ---
     exit_code = app.exec()

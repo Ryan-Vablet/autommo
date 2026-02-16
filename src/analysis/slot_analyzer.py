@@ -110,6 +110,16 @@ class SlotAnalyzer:
             self._baselines[slot_cfg.index] = self._get_brightness_channel(slot_img).copy()
         logger.info(f"Calibrated brightness baselines for {len(self._baselines)} slots")
 
+    def calibrate_single_slot(self, frame: np.ndarray, slot_index: int) -> None:
+        """Calibrate baseline for one slot only; overwrites that slot's entry in _baselines."""
+        if slot_index < 0 or slot_index >= len(self._slot_configs):
+            logger.warning(f"calibrate_single_slot: invalid slot_index {slot_index}")
+            return
+        slot_cfg = self._slot_configs[slot_index]
+        slot_img = self.crop_slot(frame, slot_cfg)
+        self._baselines[slot_index] = self._get_brightness_channel(slot_img).copy()
+        logger.info(f"Calibrated baseline for slot {slot_index}")
+
     def analyze_frame(self, frame: np.ndarray) -> ActionBarState:
         """Analyze a full action bar frame and return state for all slots.
 

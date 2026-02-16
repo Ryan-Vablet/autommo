@@ -15,8 +15,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QKeySequence
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,8 +24,11 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
+    QStatusBar,
     QVBoxLayout,
     QWidget,
     QSlider,
@@ -50,14 +53,18 @@ class MainWindow(QMainWindow):
     slot_layout_changed = pyqtSignal(int, int, int)  # slot_count, slot_gap_pixels, slot_padding
     # Emitted when overlay visibility is toggled (True = show, False = hide)
     overlay_visibility_changed = pyqtSignal(bool)
+    # Emitted when user chooses "Calibrate This Slot" for a slot index
+    calibrate_slot_requested = pyqtSignal(int)
 
     def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._config = config
+        self._listening_slot_index: Optional[int] = None
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(760, 400)
 
         self._build_ui()
+        self.setStatusBar(QStatusBar())
         self._connect_signals()
         self._sync_ui_from_config()
 
@@ -74,15 +81,16 @@ class MainWindow(QMainWindow):
         monitor_layout.addWidget(self._monitor_combo)
         layout.addWidget(monitor_group)
 
-        # --- Bounding box calibration ---
-        bbox_group = QGroupBox("Capture Region (pixels relative to monitor)")
-        bbox_layout = QHBoxLayout(bbox_group)
+        # --- Capture Region ---
+        capture_group = QGroupBox("Capture Region")
+        capture_layout = QVBoxLayout(capture_group)
 
+        # Row 1: Region position and size (pixels relative to monitor)
+        region_row = QHBoxLayout()
         self._spin_top = QSpinBox()
         self._spin_left = QSpinBox()
         self._spin_width = QSpinBox()
         self._spin_height = QSpinBox()
-
         for spin, label, max_val in [
             (self._spin_top, "Top:", 4000),
             (self._spin_left, "Left:", 8000),
@@ -91,47 +99,86 @@ class MainWindow(QMainWindow):
         ]:
             spin.setRange(0, max_val)
             spin.setSingleStep(1)
-            bbox_layout.addWidget(QLabel(label))
-            bbox_layout.addWidget(spin)
+            region_row.addWidget(QLabel(label))
+            region_row.addWidget(spin)
+        capture_layout.addLayout(region_row)
 
-        self._check_overlay = QCheckBox("Show overlay")
-        bbox_layout.addWidget(self._check_overlay)
-
-        layout.addWidget(bbox_group)
-
-        # --- Detection settings ---
-        detect_group = QGroupBox("Detection")
-        detect_layout = QHBoxLayout(detect_group)
-
-        detect_layout.addWidget(QLabel("Slots:"))
+        # Row 2: Slot layout (how the region is divided)
+        slots_row = QHBoxLayout()
+        slots_row.addWidget(QLabel("Slots:"))
         self._spin_slots = QSpinBox()
         self._spin_slots.setRange(1, 24)
-        detect_layout.addWidget(self._spin_slots)
-
-        detect_layout.addWidget(QLabel("Gap:"))
+        slots_row.addWidget(self._spin_slots)
+        slots_row.addWidget(QLabel("Gap:"))
         self._spin_gap = QSpinBox()
         self._spin_gap.setRange(0, 20)
         self._spin_gap.setSuffix(" px")
-        detect_layout.addWidget(self._spin_gap)
-
-        detect_layout.addWidget(QLabel("Padding:"))
+        slots_row.addWidget(self._spin_gap)
+        slots_row.addWidget(QLabel("Padding:"))
         self._spin_padding = QSpinBox()
         self._spin_padding.setRange(0, 20)
         self._spin_padding.setSuffix(" px")
-        detect_layout.addWidget(self._spin_padding)
+        slots_row.addWidget(self._spin_padding)
+        slots_row.addStretch()
+        capture_layout.addLayout(slots_row)
 
-        detect_layout.addWidget(QLabel("Brightness drop:"))
+        # Row 3: Overlay
+        overlay_row = QHBoxLayout()
+        self._check_overlay = QCheckBox("Show overlay")
+        overlay_row.addWidget(self._check_overlay)
+        overlay_row.addStretch()
+        capture_layout.addLayout(overlay_row)
+
+        layout.addWidget(capture_group)
+
+        # --- Detection settings ---
+        detect_group = QGroupBox("Detection")
+        detect_layout = QVBoxLayout(detect_group)
+
+        # Darken threshold: how much a pixel must drop to count as "darkened"
+        darken_row = QHBoxLayout()
+        darken_row.addWidget(QLabel("Darken threshold:"))
         self._spin_brightness_drop = QSpinBox()
         self._spin_brightness_drop.setRange(0, 255)
-        detect_layout.addWidget(self._spin_brightness_drop)
+        darken_row.addWidget(self._spin_brightness_drop)
+        darken_help = QLabel("(?)")
+        darken_help.setStyleSheet("color: #666; font-size: 11px;")
+        darken_help.setCursor(Qt.CursorShape.PointingHandCursor)
+        darken_help.setToolTip(
+            "Each pixel is compared to its calibrated baseline. If brightness drops by more than "
+            "this amount (0–255), the pixel counts as \"darkened\" (e.g. by a cooldown overlay).\n\n"
+            "• Higher value = need a bigger drop to count (stricter, fewer pixels trigger).\n"
+            "• Lower value = smaller drop counts (more sensitive; may see cooldown earlier)."
+        )
+        darken_row.addWidget(darken_help)
+        darken_row.addStretch()
+        detect_layout.addLayout(darken_row)
 
-        detect_layout.addWidget(QLabel("CD fraction:"))
+        # Trigger fraction: fraction of pixels darkened to mark slot as ON_COOLDOWN
+        trigger_row = QHBoxLayout()
+        trigger_row.addWidget(QLabel("Trigger fraction:"))
         self._slider_pixel_fraction = QSlider(Qt.Orientation.Horizontal)
         self._slider_pixel_fraction.setRange(10, 90)  # 0.10 to 0.90
         self._slider_pixel_fraction.setSingleStep(5)
+        self._slider_pixel_fraction.setMaximumWidth(200)
         self._pixel_fraction_label = QLabel("0.30")
-        detect_layout.addWidget(self._slider_pixel_fraction)
-        detect_layout.addWidget(self._pixel_fraction_label)
+        self._pixel_fraction_label.setMinimumWidth(32)
+        trigger_row.addWidget(self._slider_pixel_fraction)
+        trigger_row.addWidget(self._pixel_fraction_label)
+        trigger_help = QLabel("(?)")
+        trigger_help.setStyleSheet("color: #666; font-size: 11px;")
+        trigger_help.setCursor(Qt.CursorShape.PointingHandCursor)
+        trigger_help.setToolTip(
+            "A slot is marked ON COOLDOWN when this fraction of its pixels are \"darkened\" "
+            "(compared to the Darken threshold).\n\n"
+            "• Slide RIGHT (higher) = need more darkened pixels to trigger (less sensitive; "
+            "reduces false cooldowns, but may miss short or partial overlays).\n"
+            "• Slide LEFT (lower) = need fewer darkened pixels (more sensitive; triggers earlier, "
+            "good for GCD or partial sweeps)."
+        )
+        trigger_row.addWidget(trigger_help)
+        trigger_row.addStretch()
+        detect_layout.addLayout(trigger_row)
 
         layout.addWidget(detect_group)
 
@@ -151,6 +198,9 @@ class MainWindow(QMainWindow):
         self._preview_label = QLabel("No capture running")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setMinimumHeight(80)
+        self._preview_label.setMinimumWidth(200)
+        self._preview_label.setScaledContents(False)
+        self._preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._preview_label.setStyleSheet("background-color: #1a1a1a; color: #666;")
         preview_layout.addWidget(self._preview_label)
         layout.addWidget(preview_group)
@@ -158,7 +208,7 @@ class MainWindow(QMainWindow):
         # --- Slot state display ---
         state_group = QGroupBox("Slot States")
         self._state_layout = QHBoxLayout(state_group)
-        self._slot_labels: list[QLabel] = []
+        self._slot_buttons: list[QPushButton] = []
         layout.addWidget(state_group)
 
     def _connect_signals(self) -> None:
@@ -195,6 +245,9 @@ class MainWindow(QMainWindow):
             self._spin_gap.blockSignals(False)
             self._spin_padding.blockSignals(False)
         self._check_overlay.setChecked(self._config.overlay_enabled)
+        # Pad keybinds to match slot count
+        while len(self._config.keybinds) < self._config.slot_count:
+            self._config.keybinds.append("")
         self._spin_brightness_drop.blockSignals(True)
         self._slider_pixel_fraction.blockSignals(True)
         try:
@@ -235,57 +288,145 @@ class MainWindow(QMainWindow):
             self._config.slot_padding,
         )
 
+    # Padding (px) around the preview image inside the Live Preview panel
+    PREVIEW_PADDING = 12
+
     def update_preview(self, frame: np.ndarray) -> None:
-        """Update the live preview with a captured frame (BGR numpy array)."""
+        """Update the live preview with a captured frame (BGR numpy array).
+
+        Scales the image to fit inside the label with equal padding on all sides,
+        preserving aspect ratio (letterbox or pillarbox as needed).
+        """
         h, w, ch = frame.shape
         bytes_per_line = ch * w
-        # Convert BGR to RGB for Qt
         rgb = frame[:, :, ::-1].copy()
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg).scaledToWidth(
-            self._preview_label.width(), Qt.TransformationMode.SmoothTransformation
+        pixmap = QPixmap.fromImage(qimg)
+
+        max_w = max(1, self._preview_label.width() - 2 * self.PREVIEW_PADDING)
+        max_h = max(1, self._preview_label.height() - 2 * self.PREVIEW_PADDING)
+        scaled = pixmap.scaled(
+            max_w,
+            max_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
-        self._preview_label.setPixmap(pixmap)
+        self._preview_label.setPixmap(scaled)
+
+    def _apply_slot_button_style(
+        self, btn: QPushButton, state: str, keybind: str, cooldown_remaining: Optional[float] = None
+    ) -> None:
+        """Set slot button text and background color by state. Skip if this slot is listening."""
+        idx = self._slot_buttons.index(btn) if btn in self._slot_buttons else -1
+        if idx >= 0 and self._listening_slot_index == idx:
+            return  # Keep blue while listening
+        display_key = keybind if keybind else "?"
+        text = f"[{display_key}]"
+        if cooldown_remaining is not None:
+            text += f"\n{cooldown_remaining:.1f}s"
+        btn.setText(text)
+        color = {
+            "ready": "#2d5a2d",
+            "on_cooldown": "#5a2d2d",
+            "gcd": "#5a5a2d",
+            "unknown": "#333333",
+        }.get(state, "#333333")
+        btn.setStyleSheet(
+            f"background-color: {color}; color: white; border: 1px solid #444; padding: 4px;"
+        )
+
+    def _show_slot_menu(self, slot_index: int) -> None:
+        """Show context menu above the slot button with Bind Key and Calibrate This Slot."""
+        if slot_index < 0 or slot_index >= len(self._slot_buttons):
+            return
+        btn = self._slot_buttons[slot_index]
+        menu = QMenu(self)
+        menu.addAction("Bind Key", lambda: self._start_listening_for_key(slot_index))
+        menu.addAction("Calibrate This Slot", lambda: self.calibrate_slot_requested.emit(slot_index))
+        # Show menu above the button (slots at bottom of window)
+        pos = btn.mapToGlobal(QPoint(0, 0)) - QPoint(0, menu.sizeHint().height())
+        menu.popup(pos)
+
+    def _start_listening_for_key(self, slot_index: int) -> None:
+        """Turn slot button blue and show status; next keypress will bind (or Esc cancel)."""
+        self._cancel_listening()
+        self._listening_slot_index = slot_index
+        if slot_index < len(self._slot_buttons):
+            self._slot_buttons[slot_index].setStyleSheet(
+                "background-color: #2d2d5a; color: white; border: 1px solid #444; padding: 4px;"
+            )
+        self.statusBar().showMessage(
+            f"Press a key to bind to slot {slot_index + 1}... (Esc to cancel)"
+        )
+
+    def _cancel_listening(self) -> None:
+        """Cancel key-binding mode and revert button / status."""
+        if self._listening_slot_index is None:
+            return
+        idx = self._listening_slot_index
+        self._listening_slot_index = None
+        self.statusBar().clearMessage()
+        if idx < len(self._slot_buttons):
+            keybind = self._config.keybinds[idx] if idx < len(self._config.keybinds) else "?"
+            self._apply_slot_button_style(
+                self._slot_buttons[idx], "unknown", keybind or "?"
+            )
+
+    def keyPressEvent(self, event) -> None:
+        """Capture key when in bind mode: Esc cancels, any other key binds to the slot."""
+        if self._listening_slot_index is not None:
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_listening()
+                event.accept()
+                return
+            key_str = QKeySequence(event.key()).toString().strip()
+            if key_str:
+                idx = self._listening_slot_index
+                while len(self._config.keybinds) <= idx:
+                    self._config.keybinds.append("")
+                self._config.keybinds[idx] = key_str
+                self._listening_slot_index = None
+                self.statusBar().clearMessage()
+                if idx < len(self._slot_buttons):
+                    self._apply_slot_button_style(
+                        self._slot_buttons[idx], "unknown", key_str
+                    )
+                self.config_changed.emit(self._config)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def update_slot_states(self, states: list[dict]) -> None:
-        """Update the slot state indicators.
+        """Update the slot state indicators (QPushButtons with keybind + state color).
 
         Args:
             states: List of dicts with keys: index, state, keybind, cooldown_remaining
         """
-        # Rebuild labels if slot count changed
-        if len(self._slot_labels) != len(states):
-            for lbl in self._slot_labels:
-                lbl.deleteLater()
-            self._slot_labels.clear()
-            for _ in states:
-                lbl = QLabel()
-                lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                lbl.setMinimumWidth(52)
-                lbl.setStyleSheet("border: 1px solid #444; padding: 4px;")
-                self._state_layout.addWidget(lbl)
-                self._slot_labels.append(lbl)
+        # Pad keybinds so we can index by slot
+        while len(self._config.keybinds) < len(states):
+            self._config.keybinds.append("")
 
-        for lbl, s in zip(self._slot_labels, states):
-            keybind = s.get("keybind", "?")
+        if len(self._slot_buttons) != len(states):
+            for b in self._slot_buttons:
+                b.deleteLater()
+            self._slot_buttons.clear()
+            for i in range(len(states)):
+                btn = QPushButton()
+                btn.setMinimumWidth(52)
+                btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+                btn.setStyleSheet("border: 1px solid #444; padding: 4px;")
+                btn.clicked.connect(lambda checked=False, idx=i: self._show_slot_menu(idx))
+                self._state_layout.addWidget(btn)
+                self._slot_buttons.append(btn)
+
+        for btn, s in zip(self._slot_buttons, states):
+            keybind = s.get("keybind")
+            if keybind is None and s["index"] < len(self._config.keybinds):
+                keybind = self._config.keybinds[s["index"]] or None
+            keybind = keybind or "?"
             state = s.get("state", "unknown")
             cd = s.get("cooldown_remaining")
-
-            text = f"[{keybind}]"
-            if cd is not None:
-                text += f"\n{cd:.1f}s"
-
-            color = {
-                "ready": "#2d5a2d",
-                "on_cooldown": "#5a2d2d",
-                "gcd": "#5a5a2d",
-                "unknown": "#333333",
-            }.get(state, "#333333")
-
-            lbl.setText(text)
-            lbl.setStyleSheet(
-                f"background-color: {color}; color: white; border: 1px solid #444; padding: 4px;"
-            )
+            self._apply_slot_button_style(btn, state, keybind, cd)
 
     def _save_config(self) -> None:
         """Persist current config to JSON and show Saved ✓ feedback."""

@@ -91,6 +91,7 @@ class AppConfig:
     ocr_enabled: bool = True
     overlay_enabled: bool = True
     overlay_border_color: str = "#00FF00"
+    keybinds: list[str] = field(default_factory=list)  # keybinds[slot_index] = key string, e.g. "5", "F"
 
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
@@ -112,6 +113,7 @@ class AppConfig:
             ocr_enabled=data.get("detection", {}).get("ocr_enabled", True),
             overlay_enabled=data.get("overlay", {}).get("enabled", True),
             overlay_border_color=data.get("overlay", {}).get("border_color", "#00FF00"),
+            keybinds=data.get("slots", {}).get("keybinds", []),
         )
 
     def to_dict(self) -> dict:
@@ -123,7 +125,7 @@ class AppConfig:
                 "count": self.slot_count,
                 "gap_pixels": self.slot_gap_pixels,
                 "padding": self.slot_padding,
-                "keybinds": [],
+                "keybinds": self.keybinds,
             },
             "detection": {
                 "polling_fps": self.polling_fps,
