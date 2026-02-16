@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class CalibrationOverlay(QWidget):
-    """Transparent overlay window that shows the capture bounding box."""
+    """Transparent overlay window that shows the capture bounding box and per-slot analyzed regions."""
 
     def __init__(self, monitor_geometry: QRect, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -27,6 +27,9 @@ class CalibrationOverlay(QWidget):
         self._border_color = QColor("#00FF00")
         self._border_width = 2
         self._monitor_geometry = monitor_geometry
+        self._slot_count = 10
+        self._slot_gap = 2
+        self._slot_padding = 3
 
         self._setup_window()
 
@@ -49,24 +52,65 @@ class CalibrationOverlay(QWidget):
         self._bbox = bbox
         self.update()  # Triggers paintEvent
 
+    def update_slot_layout(self, slot_count: int, slot_gap: int, slot_padding: int) -> None:
+        """Update slot layout (same math as SlotAnalyzer) and repaint per-slot outlines."""
+        self._slot_count = slot_count
+        self._slot_gap = slot_gap
+        self._slot_padding = slot_padding
+        self.update()
+
     def update_border_color(self, color: str) -> None:
         """Update the overlay border color."""
         self._border_color = QColor(color)
         self.update()
 
+    def _slot_analyzed_rects(self) -> list[QRect]:
+        """Compute analyzed region rects (after padding) using same math as SlotAnalyzer."""
+        total_width = self._bbox.width
+        total_height = self._bbox.height
+        gap = self._slot_gap
+        count = self._slot_count
+        padding = self._slot_padding
+
+        slot_w = max(1, (total_width - (count - 1) * gap) // count)
+        slot_h = total_height
+
+        rects: list[QRect] = []
+        for i in range(count):
+            x = i * (slot_w + gap)
+            inner_w = max(0, slot_w - 2 * padding)
+            inner_h = max(0, slot_h - 2 * padding)
+            rects.append(
+                QRect(
+                    self._bbox.left + x + padding,
+                    self._bbox.top + padding,
+                    inner_w,
+                    inner_h,
+                )
+            )
+        return rects
+
     def paintEvent(self, event) -> None:
-        """Draw the bounding box rectangle."""
+        """Draw the bounding box and per-slot analyzed regions."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        # Green bounding box
         pen = QPen(self._border_color, self._border_width)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-
         painter.drawRect(
             self._bbox.left,
             self._bbox.top,
             self._bbox.width,
             self._bbox.height,
         )
+
+        # Pink/magenta 1px outlines for each analyzed slot region
+        slot_pen = QPen(QColor("#FF00FF"), 1)
+        painter.setPen(slot_pen)
+        for rect in self._slot_analyzed_rects():
+            if rect.width() > 0 and rect.height() > 0:
+                painter.drawRect(rect)
+
         painter.end()

@@ -132,9 +132,15 @@ def main() -> None:
 
     # --- Wire signals ---
     window.bounding_box_changed.connect(overlay.update_bounding_box)
+    window.slot_layout_changed.connect(overlay.update_slot_layout)
     window.config_changed.connect(worker.update_config)
     worker.frame_captured.connect(window.update_preview)
     worker.state_updated.connect(window.update_slot_states)
+
+    # Emit initial slot layout so overlay draws slot outlines
+    window.slot_layout_changed.emit(
+        config.slot_count, config.slot_gap_pixels, config.slot_padding
+    )
 
     # Start/stop capture via button
     is_running = [False]
@@ -152,6 +158,10 @@ def main() -> None:
     window._btn_start.clicked.connect(toggle_capture)
 
     # Calibrate baselines: grab one frame on main thread with short-lived mss
+    def revert_calibrate_button():
+        window._btn_calibrate.setText("Calibrate Baselines")
+        window._btn_calibrate.setStyleSheet("")
+
     def calibrate_baselines():
         try:
             cap = ScreenCapture(monitor_index=config.monitor_index)
@@ -160,8 +170,14 @@ def main() -> None:
             cap.stop()
             analyzer.calibrate_baselines(frame)
             logger.info("Baselines calibrated from current frame")
+            window._btn_calibrate.setText("Calibrated ✓")
+            window._btn_calibrate.setStyleSheet("")
+            QTimer.singleShot(2000, revert_calibrate_button)
         except Exception as e:
             logger.error(f"Calibration failed: {e}")
+            window._btn_calibrate.setText("Calibration Failed")
+            window._btn_calibrate.setStyleSheet("color: red;")
+            QTimer.singleShot(2000, revert_calibrate_button)
 
     window._btn_calibrate.clicked.connect(calibrate_baselines)
 

@@ -62,11 +62,19 @@ class SlotAnalyzer:
         self._recompute_slot_layout()
 
     def crop_slot(self, frame: np.ndarray, slot: SlotConfig) -> np.ndarray:
-        """Extract a single slot's image from the action bar frame."""
-        return frame[
-            slot.y_offset : slot.y_offset + slot.height,
-            slot.x_offset : slot.x_offset + slot.width,
-        ]
+        """Extract a single slot's image from the action bar frame.
+
+        Applies slot_padding as an inset on all four sides so the analyzed
+        region excludes gap pixels and icon borders.
+        """
+        pad = self._config.slot_padding
+        x1 = slot.x_offset + pad
+        y1 = slot.y_offset + pad
+        w = max(1, slot.width - 2 * pad)
+        h = max(1, slot.height - 2 * pad)
+        x2 = x1 + w
+        y2 = y1 + h
+        return frame[y1:y2, x1:x2]
 
     def compute_brightness(self, slot_image: np.ndarray) -> float:
         """Compute normalized average brightness (0.0 to 1.0) of a slot image."""

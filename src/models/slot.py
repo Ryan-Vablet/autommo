@@ -78,6 +78,7 @@ class AppConfig:
     bounding_box: BoundingBox = field(default_factory=BoundingBox)
     slot_count: int = 10
     slot_gap_pixels: int = 2
+    slot_padding: int = 3
     polling_fps: int = 20
     brightness_threshold: float = 0.65
     cooldown_min_duration_ms: int = 2000
@@ -93,6 +94,7 @@ class AppConfig:
             bounding_box=BoundingBox(**bb),
             slot_count=data.get("slots", {}).get("count", 10),
             slot_gap_pixels=data.get("slots", {}).get("gap_pixels", 2),
+            slot_padding=data.get("slots", {}).get("padding", 3),
             polling_fps=data.get("detection", {}).get("polling_fps", 20),
             brightness_threshold=data.get("detection", {}).get("brightness_threshold", 0.65),
             cooldown_min_duration_ms=data.get("detection", {}).get("cooldown_min_duration_ms", 2000),

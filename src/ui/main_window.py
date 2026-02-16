@@ -45,6 +45,8 @@ class MainWindow(QMainWindow):
     # Emitted when bounding box changes, so overlay can update
     bounding_box_changed = pyqtSignal(BoundingBox)
     config_changed = pyqtSignal(AppConfig)
+    # Emitted when slot layout changes (count, gap, padding) for overlay slot outlines
+    slot_layout_changed = pyqtSignal(int, int, int)  # slot_count, slot_gap_pixels, slot_padding
 
     def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -100,6 +102,18 @@ class MainWindow(QMainWindow):
         self._spin_slots.setRange(1, 24)
         detect_layout.addWidget(self._spin_slots)
 
+        detect_layout.addWidget(QLabel("Gap:"))
+        self._spin_gap = QSpinBox()
+        self._spin_gap.setRange(0, 20)
+        self._spin_gap.setSuffix(" px")
+        detect_layout.addWidget(self._spin_gap)
+
+        detect_layout.addWidget(QLabel("Padding:"))
+        self._spin_padding = QSpinBox()
+        self._spin_padding.setRange(0, 20)
+        self._spin_padding.setSuffix(" px")
+        detect_layout.addWidget(self._spin_padding)
+
         detect_layout.addWidget(QLabel("Brightness Threshold:"))
         self._slider_threshold = QSlider(Qt.Orientation.Horizontal)
         self._slider_threshold.setRange(30, 95)
@@ -141,7 +155,9 @@ class MainWindow(QMainWindow):
         self._spin_left.valueChanged.connect(self._on_bbox_changed)
         self._spin_width.valueChanged.connect(self._on_bbox_changed)
         self._spin_height.valueChanged.connect(self._on_bbox_changed)
-        self._spin_slots.valueChanged.connect(self._on_config_changed)
+        self._spin_slots.valueChanged.connect(self._on_slot_layout_changed)
+        self._spin_gap.valueChanged.connect(self._on_slot_layout_changed)
+        self._spin_padding.valueChanged.connect(self._on_slot_layout_changed)
         self._slider_threshold.valueChanged.connect(self._on_threshold_changed)
         self._btn_save_config.clicked.connect(self._save_config)
 
@@ -153,6 +169,8 @@ class MainWindow(QMainWindow):
         self._spin_width.setValue(bb.width)
         self._spin_height.setValue(bb.height)
         self._spin_slots.setValue(self._config.slot_count)
+        self._spin_gap.setValue(self._config.slot_gap_pixels)
+        self._spin_padding.setValue(self._config.slot_padding)
         self._slider_threshold.setValue(int(self._config.brightness_threshold * 100))
         self._threshold_label.setText(f"{self._config.brightness_threshold:.2f}")
 
@@ -169,9 +187,16 @@ class MainWindow(QMainWindow):
         self._config.brightness_threshold = value / 100.0
         self._threshold_label.setText(f"{self._config.brightness_threshold:.2f}")
 
-    def _on_config_changed(self) -> None:
+    def _on_slot_layout_changed(self) -> None:
         self._config.slot_count = self._spin_slots.value()
+        self._config.slot_gap_pixels = self._spin_gap.value()
+        self._config.slot_padding = self._spin_padding.value()
         self.config_changed.emit(self._config)
+        self.slot_layout_changed.emit(
+            self._config.slot_count,
+            self._config.slot_gap_pixels,
+            self._config.slot_padding,
+        )
 
     def update_preview(self, frame: np.ndarray) -> None:
         """Update the live preview with a captured frame (BGR numpy array)."""
