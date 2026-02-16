@@ -96,6 +96,9 @@ class AppConfig:
     slot_baselines: list = field(default_factory=list)
     # Slot indices that had their baseline set by "Calibrate This Slot" (show bold in UI)
     overwritten_baseline_slots: list[int] = field(default_factory=list)
+    # Priority order for automation: list of slot indices (first READY in this order is "next")
+    priority_order: list[int] = field(default_factory=list)
+    automation_enabled: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
@@ -120,6 +123,8 @@ class AppConfig:
             keybinds=data.get("slots", {}).get("keybinds", []),
             slot_baselines=data.get("slot_baselines", []),
             overwritten_baseline_slots=data.get("overwritten_baseline_slots", []),
+            priority_order=data.get("priority_order", []),
+            automation_enabled=data.get("automation_enabled", False),
         )
 
     def to_dict(self) -> dict:
@@ -147,4 +152,6 @@ class AppConfig:
             },
             "slot_baselines": self.slot_baselines,
             "overwritten_baseline_slots": self.overwritten_baseline_slots,
+            "priority_order": self.priority_order,
+            "automation_enabled": self.automation_enabled,
         }

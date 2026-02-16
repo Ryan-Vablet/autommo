@@ -37,6 +37,36 @@ from PyQt6.QtWidgets import (
 import numpy as np
 
 from src.models import AppConfig, BoundingBox
+from src.ui.priority_panel import (
+    MIME_PRIORITY_ITEM,
+    PriorityPanel,
+    SlotButton,
+)
+
+
+class _LeftPanel(QWidget):
+    """Left content area; accepts drops of priority items to remove them from the list."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._on_priority_drop_remove: Callable[[int], None] = lambda _: None
+
+    def set_drop_remove_callback(self, callback: Callable[[int], None]) -> None:
+        self._on_priority_drop_remove = callback
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(MIME_PRIORITY_ITEM):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasFormat(MIME_PRIORITY_ITEM):
+            try:
+                slot_index = int(event.mimeData().data(MIME_PRIORITY_ITEM).data().decode())
+                self._on_priority_drop_remove(slot_index)
+            except (ValueError, TypeError):
+                pass
+        event.acceptProposedAction()
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +94,7 @@ class MainWindow(QMainWindow):
         self._slots_recalibrated: set[int] = set(getattr(config, "overwritten_baseline_slots", []))
         self._before_save_callback: Optional[Callable[[], None]] = None
         self.setWindowTitle("Cooldown Reader")
-        self.setMinimumSize(760, 400)
+        self.setMinimumSize(800, 400)
 
         self._build_ui()
         self.setStatusBar(QStatusBar())
@@ -74,7 +104,12 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        top_layout = QHBoxLayout(central)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Left panel: all existing content (drop target for removing priority items)
+        self._left_panel = _LeftPanel(parent=central)
+        layout = QVBoxLayout(self._left_panel)
 
         # --- Monitor selector ---
         monitor_group = QGroupBox("Monitor")
@@ -211,8 +246,13 @@ class MainWindow(QMainWindow):
         # --- Slot state display ---
         state_group = QGroupBox("Slot States")
         self._state_layout = QHBoxLayout(state_group)
-        self._slot_buttons: list[QPushButton] = []
+        self._slot_buttons: list[SlotButton] = []
         layout.addWidget(state_group)
+
+        top_layout.addWidget(self._left_panel, 1)
+        self._priority_panel = PriorityPanel(self)
+        top_layout.addWidget(self._priority_panel, 0)
+        self._left_panel.set_drop_remove_callback(self._on_priority_drop_remove)
 
     def _connect_signals(self) -> None:
         """Wire up UI controls to config updates."""
@@ -227,6 +267,8 @@ class MainWindow(QMainWindow):
         self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._btn_save_config.clicked.connect(self._save_config)
+        self._priority_panel.automation_check.toggled.connect(self._on_automation_toggled)
+        self._priority_panel.priority_list.order_changed.connect(self._on_priority_order_changed)
 
     def _sync_ui_from_config(self) -> None:
         """Set UI controls to match current config."""
@@ -260,6 +302,17 @@ class MainWindow(QMainWindow):
         finally:
             self._spin_brightness_drop.blockSignals(False)
             self._slider_pixel_fraction.blockSignals(False)
+        self._priority_panel.automation_check.blockSignals(True)
+        try:
+            self._priority_panel.automation_check.setChecked(bool(self._config.automation_enabled))
+        finally:
+            self._priority_panel.automation_check.blockSignals(False)
+        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
+        self._priority_panel.priority_list.blockSignals(True)
+        try:
+            self._priority_panel.priority_list.set_order(getattr(self._config, "priority_order", []))
+        finally:
+            self._priority_panel.priority_list.blockSignals(False)
 
     def _on_bbox_changed(self) -> None:
         self._config.bounding_box = BoundingBox(
@@ -290,6 +343,20 @@ class MainWindow(QMainWindow):
             self._config.slot_gap_pixels,
             self._config.slot_padding,
         )
+
+    def _on_automation_toggled(self, checked: bool) -> None:
+        self._config.automation_enabled = checked
+        self.config_changed.emit(self._config)
+
+    def _on_priority_order_changed(self, order: list) -> None:
+        self._config.priority_order = list(order)
+        self.config_changed.emit(self._config)
+
+    def _on_priority_drop_remove(self, slot_index: int) -> None:
+        """Called when a priority item is dropped on the left panel (remove from list)."""
+        self._priority_panel.priority_list.remove_slot(slot_index)
+        self._config.priority_order = self._priority_panel.priority_list.get_order()
+        self.config_changed.emit(self._config)
 
     # Padding (px) around the preview image inside the Live Preview panel
     PREVIEW_PADDING = 12
@@ -345,6 +412,14 @@ class MainWindow(QMainWindow):
         font = btn.font()
         font.setBold(idx >= 0 and idx in self._slots_recalibrated)
         btn.setFont(font)
+
+    def _next_ready_priority_slot(self, states: list[dict]) -> Optional[int]:
+        """First slot in priority_order that is READY; None if none or automation off."""
+        by_index = {s["index"]: s.get("state") for s in states}
+        for slot_index in getattr(self._config, "priority_order", []):
+            if by_index.get(slot_index) == "ready":
+                return slot_index
+        return None
 
     def _show_slot_menu(self, slot_index: int) -> None:
         """Show context menu above the slot button with Bind Key and Calibrate This Slot."""
@@ -422,11 +497,11 @@ class MainWindow(QMainWindow):
                 b.deleteLater()
             self._slot_buttons.clear()
             for i in range(len(states)):
-                btn = QPushButton()
+                btn = SlotButton(i, self._state_layout.parentWidget())
                 btn.setMinimumWidth(52)
                 btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
                 btn.setStyleSheet("border: 1px solid #444; padding: 4px;")
-                btn.clicked.connect(lambda checked=False, idx=i: self._show_slot_menu(idx))
+                btn.context_menu_requested.connect(self._show_slot_menu)
                 self._state_layout.addWidget(btn)
                 self._slot_buttons.append(btn)
 
@@ -438,6 +513,19 @@ class MainWindow(QMainWindow):
             state = s.get("state", "unknown")
             cd = s.get("cooldown_remaining")
             self._apply_slot_button_style(btn, state, keybind, cd, slot_index=s["index"])
+
+        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
+        self._priority_panel.priority_list.update_states(states)
+        next_slot = self._next_ready_priority_slot(states)
+        if next_slot is not None and self._config.automation_enabled:
+            keybind = (
+                self._config.keybinds[next_slot]
+                if next_slot < len(self._config.keybinds)
+                else "?"
+            )
+            self._priority_panel.next_intention_label.setText(f"[{keybind or '?'}] — ready")
+        else:
+            self._priority_panel.next_intention_label.setText("—")
 
     def set_before_save_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Set a callback run before writing config (e.g. to sync baselines from analyzer)."""
