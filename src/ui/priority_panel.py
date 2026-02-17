@@ -85,6 +85,7 @@ def _format_countdown(seconds: Optional[float]) -> str:
 
 class PriorityItemWidget(QFrame):
     """One row: handle + [key] + name + countdown. Draggable for reorder."""
+    remove_requested = pyqtSignal(str)
 
     def __init__(
         self,
@@ -152,6 +153,7 @@ class PriorityItemWidget(QFrame):
         self._remove_btn = QLabel("-")
         self._remove_btn.setObjectName("priorityRemove")
         self._remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._remove_btn.setToolTip("Remove from priority list")
         layout.addWidget(self._remove_btn)
 
         self.setMinimumHeight(40)
@@ -248,6 +250,10 @@ class PriorityItemWidget(QFrame):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._remove_btn.geometry().contains(event.position().toPoint()):
+                self.remove_requested.emit(self._item_key)
+                event.accept()
+                return
             self._drag_start = event.position().toPoint()
         super().mousePressEvent(event)
 
@@ -262,7 +268,9 @@ class PriorityItemWidget(QFrame):
         mime.setData(MIME_PRIORITY_ITEM, self._item_key.encode())
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
+        result = drag.exec(Qt.DropAction.MoveAction)
+        if result == Qt.DropAction.IgnoreAction:
+            self.remove_requested.emit(self._item_key)
         self._drag_start = None
         super().mouseMoveEvent(event)
 
@@ -430,6 +438,7 @@ class PriorityListWidget(QWidget):
             else:
                 w.set_state("ready", None, None, None)
             self._list_layout.insertWidget(self._list_layout.count() - 1, w)
+            w.remove_requested.connect(self.remove_item_by_key)
             self._item_widgets.append(w)
 
     def _emit_items(self) -> None:
