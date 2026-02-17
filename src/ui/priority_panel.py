@@ -140,7 +140,7 @@ class PriorityItemWidget(QFrame):
         self._countdown_label.setFont(font)
         self._countdown_label.setStyleSheet("font-size: 11px;")
         layout.addWidget(self._countdown_label)
-        self.setFixedHeight(44)
+        self.setFixedHeight(36)
         self._update_style()
 
     @property

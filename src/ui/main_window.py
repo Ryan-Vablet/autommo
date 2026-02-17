@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(self._left_panel)
 
         # --- Monitor selector ---
-        monitor_group = QGroupBox("Monitor")
+        monitor_group = QGroupBox("Display")
         monitor_layout = QHBoxLayout(monitor_group)
         self._monitor_combo = QComboBox()
         self._monitor_combo.setMaximumWidth(180)
