@@ -109,6 +109,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.setStatusBar(QStatusBar())
+        self._gcd_label = QLabel("Est. GCD: waiting for data…")
+        self._gcd_label.setStyleSheet("color: #aaa; font-size: 11px; padding-right: 6px;")
+        self.statusBar().addPermanentWidget(self._gcd_label)
         self._connect_signals()
         self._sync_ui_from_config()
 
@@ -320,6 +323,7 @@ class MainWindow(QMainWindow):
         self._spin_min_delay.valueChanged.connect(self._on_min_delay_changed)
         self._edit_window_title.textChanged.connect(self._on_window_title_changed)
         self._priority_panel.priority_list.order_changed.connect(self._on_priority_order_changed)
+        self._priority_panel.gcd_updated.connect(self._on_gcd_updated)
 
     def _sync_ui_from_config(self) -> None:
         """Set UI controls to match current config."""
@@ -556,6 +560,11 @@ class MainWindow(QMainWindow):
         self._config.priority_order = list(order)
         self.config_changed.emit(self._config)
         self._update_save_button_state()
+
+    def _on_gcd_updated(self, gcd_seconds: float) -> None:
+        """Update the estimated GCD display in the status bar."""
+        ms = gcd_seconds * 1000
+        self._gcd_label.setText(f"Est. GCD: {ms:.0f}ms")
 
     def _on_priority_drop_remove(self, slot_index: int) -> None:
         """Called when a priority item is dropped on the left panel (remove from list)."""

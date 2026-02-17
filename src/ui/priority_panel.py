@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import statistics
 import time
 from typing import Optional
 
@@ -344,6 +345,11 @@ class PriorityListWidget(QWidget):
 class PriorityPanel(QWidget):
     """Right-side panel: last action, next intention, priority list."""
 
+    gcd_updated = pyqtSignal(float)  # Estimated GCD in seconds
+
+    GCD_WINDOW_SIZE = 20  # Number of recent send timestamps to keep
+    GCD_MIN_SAMPLES = 3   # Minimum sends before estimating (need >= 2 intervals)
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFixedWidth(200)
@@ -363,6 +369,8 @@ class PriorityPanel(QWidget):
         self._last_action_timer = QTimer(self)
         self._last_action_timer.setInterval(100)
         self._last_action_timer.timeout.connect(self._on_last_action_timer)
+
+        self._send_timestamps: list[float] = []
 
         next_intention_group = QGroupBox("Next Intention")
         next_intention_layout = QVBoxLayout(next_intention_group)
@@ -399,6 +407,13 @@ class PriorityPanel(QWidget):
             self._last_action_timer.start()
         self._on_last_action_timer()
 
+        self._send_timestamps.append(timestamp)
+        if len(self._send_timestamps) > self.GCD_WINDOW_SIZE:
+            self._send_timestamps = self._send_timestamps[-self.GCD_WINDOW_SIZE:]
+        gcd = self._compute_estimated_gcd()
+        if gcd is not None:
+            self.gcd_updated.emit(gcd)
+
     def _on_last_action_timer(self) -> None:
         if self._last_action_keybind is None:
             self._last_action_timer.stop()
@@ -414,3 +429,21 @@ class PriorityPanel(QWidget):
     def stop_last_action_timer(self) -> None:
         """Stop the 'Xs ago' timer (e.g. when automation is turned off)."""
         self._last_action_timer.stop()
+
+    def _compute_estimated_gcd(self) -> Optional[float]:
+        """Estimate the GCD from the median interval between recent key sends.
+
+        Uses the median rather than the mean so that occasional long gaps
+        (when no ability was available) are ignored as outliers.
+        """
+        if len(self._send_timestamps) < self.GCD_MIN_SAMPLES:
+            return None
+        intervals = [
+            self._send_timestamps[i] - self._send_timestamps[i - 1]
+            for i in range(1, len(self._send_timestamps))
+        ]
+        return statistics.median(intervals)
+
+    def reset_gcd_estimate(self) -> None:
+        """Clear tracked send timestamps (e.g. when priority list changes)."""
+        self._send_timestamps.clear()
