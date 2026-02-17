@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QKeySequence
+from PyQt6.QtGui import QFontMetrics, QImage, QPixmap, QKeySequence
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -89,7 +89,9 @@ class _SlotStatesRow(QWidget):
         if w <= 0:
             return
         total_gap = (n - 1) * self._gap
-        side = max(24, (w - total_gap) // n)
+        # Keep this row height stable; very large squares can push the lower panel
+        # over the scroll threshold and cause resize/scrollbar oscillation.
+        side = max(24, min(34, (w - total_gap) // n))
         for b in self._buttons:
             b.setFixedSize(side, side)
 
@@ -157,7 +159,7 @@ class _ActionEntryRow(QWidget):
         self._name_label.setMinimumWidth(0)
         self._name_label.setMinimumHeight(18)
         self._name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        self._name_label.setWordWrap(True)
+        self._name_label.setWordWrap(False)
         info.addWidget(self._name_label)
         self._status_label = QLabel(status)
         self._status_label.setObjectName("actionMeta")
@@ -169,6 +171,8 @@ class _ActionEntryRow(QWidget):
         self._time_label.setObjectName("actionTime")
         self._time_label.setStyleSheet("font-size: 9px; color: #555; font-family: monospace;")
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Keep row geometry stable while this text updates every 100 ms.
+        self._time_label.setFixedWidth(max(42, QFontMetrics(self._time_label.font()).horizontalAdvance("0000.0s")))
         layout.addWidget(self._time_label)
 
     def set_time(self, text: str) -> None:
@@ -278,6 +282,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._config = config
         self._key_sender: Optional["KeySender"] = None
+        self._queued_override: Optional[dict] = None
+        self._queue_listener: Optional[object] = None
         self._listening_slot_index: Optional[int] = None
         self._slots_recalibrated: set[int] = set(getattr(config, "overwritten_baseline_slots", []))
         self._before_save_callback: Optional[Callable[[], None]] = None
@@ -381,17 +387,16 @@ class MainWindow(QMainWindow):
 
         # Slot States row (fixed, not in scroll)
         self._slot_states_row = _SlotStatesRow(left_column)
-        self._slot_states_row.setMinimumHeight(40)
+        self._slot_states_row.setFixedHeight(34)
         self._slot_buttons: list[SlotButton] = []
         left_column_layout.addWidget(self._slot_states_row)
 
         # Scroll area: only Last Action + Next Intention
         self._left_panel = _LeftPanel(parent=central)
-        self._left_panel.setMinimumHeight(220)
-        self._left_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self._left_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         left_layout = QVBoxLayout(self._left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(14)
-        left_layout.addStretch(1)
         last_action_frame = QFrame()
         last_action_frame.setObjectName("sectionFrameDark")
         last_action_frame.setStyleSheet(f"background: {SECTION_BG_DARK}; border: 1px solid {SECTION_BORDER}; border-radius: 4px; padding: 8px;")
@@ -411,7 +416,6 @@ class MainWindow(QMainWindow):
         last_action_frame.setMinimumHeight(140)
         last_action_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         left_layout.addWidget(last_action_frame)
-        left_layout.addStretch(1)
         next_frame = QFrame()
         next_frame.setObjectName("sectionFrameDark")
         next_frame.setStyleSheet(f"background: {SECTION_BG_DARK}; border: 1px solid {SECTION_BORDER}; border-radius: 4px; padding: 8px 10px;")
@@ -575,6 +579,8 @@ class MainWindow(QMainWindow):
         self._config.automation_enabled = not self._config.automation_enabled
         if not self._config.automation_enabled:
             self._priority_panel.stop_last_action_timer()
+            if self._queue_listener is not None and hasattr(self._queue_listener, "clear_queue"):
+                self._queue_listener.clear_queue()
         self._update_automation_button_text()
         self.config_changed.emit(self._config)
 
@@ -583,6 +589,8 @@ class MainWindow(QMainWindow):
         self._config.automation_enabled = not self._config.automation_enabled
         if not self._config.automation_enabled:
             self._priority_panel.stop_last_action_timer()
+            if self._queue_listener is not None and hasattr(self._queue_listener, "clear_queue"):
+                self._queue_listener.clear_queue()
         self._update_automation_button_text()
         self.config_changed.emit(self._config)
 
@@ -609,6 +617,15 @@ class MainWindow(QMainWindow):
     def set_next_intention_blocked(self, keybind: str, display_name: str = "Unidentified") -> None:
         """Show next intention as blocked (wrong window)."""
         self._next_intention_row.set_content(keybind, display_name or "Unidentified", "ready (window)", KEY_YELLOW)
+
+    def set_queued_override(self, q: Optional[dict]) -> None:
+        """Update the current spell queue state (dict or None). Next intention row shows queued key when set."""
+        logger.debug("set_queued_override called with: %s", q)
+        self._queued_override = q
+
+    def set_queue_listener(self, listener: Optional[object]) -> None:
+        """Set the spell queue listener so we can clear the queue when automation is toggled off."""
+        self._queue_listener = listener
 
     def _on_priority_drop_remove(self, slot_index: int) -> None:
         """Called when a priority item is dropped on the left panel (remove from list)."""
@@ -785,6 +802,11 @@ class MainWindow(QMainWindow):
         Args:
             states: List of dicts with keys: index, state, keybind, cooldown_remaining
         """
+        # Ignore transient empty payloads while capture is running to avoid
+        # rebuilding the slot row and causing visible geometry churn.
+        if not states:
+            return
+
         # Pad keybinds so we can index by slot
         while len(self._config.keybinds) < len(states):
             self._config.keybinds.append("")
@@ -812,30 +834,47 @@ class MainWindow(QMainWindow):
 
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.update_states(states)
-        next_slot = self._next_ready_priority_slot(states)
-        if next_slot is not None:
-            keybind = (
-                self._config.keybinds[next_slot]
-                if next_slot < len(self._config.keybinds)
-                else "?"
-            )
-            keybind = keybind or "?"
+        if self._queued_override:
+            keybind = (self._queued_override.get("key") or "?").strip() or "?"
             names = getattr(self._config, "slot_display_names", [])
             slot_name = "Unidentified"
-            if next_slot < len(names) and (names[next_slot] or "").strip():
-                slot_name = (names[next_slot] or "").strip()
-            if not self._config.automation_enabled:
-                suffix = "ready (paused)"
-                color = KEY_YELLOW
-            elif self._key_sender is None or not self._key_sender.is_target_window_active():
-                suffix = "ready (window)"
-                color = KEY_YELLOW
-            else:
-                suffix = "ready — next"
-                color = KEY_GREEN
-            self._next_intention_row.set_content(keybind, slot_name, suffix, color)
+            if self._queued_override.get("source") == "tracked":
+                si = self._queued_override.get("slot_index")
+                if si is not None and si < len(names) and (names[si] or "").strip():
+                    slot_name = (names[si] or "").strip()
+            states_by_idx = {s["index"]: s for s in states}
+            slot_ready = False
+            if self._queued_override.get("source") == "tracked":
+                si = self._queued_override.get("slot_index")
+                if si is not None:
+                    slot_ready = (states_by_idx.get(si) or {}).get("state") == "ready"
+            suffix = "queued (waiting)" if not slot_ready and self._queued_override.get("source") == "tracked" else "queued"
+            self._next_intention_row.set_content(keybind, slot_name, suffix, KEY_CYAN)
         else:
-            self._next_intention_row.set_content("—", "no action", "", "#555")
+            next_slot = self._next_ready_priority_slot(states)
+            if next_slot is not None:
+                keybind = (
+                    self._config.keybinds[next_slot]
+                    if next_slot < len(self._config.keybinds)
+                    else "?"
+                )
+                keybind = keybind or "?"
+                names = getattr(self._config, "slot_display_names", [])
+                slot_name = "Unidentified"
+                if next_slot < len(names) and (names[next_slot] or "").strip():
+                    slot_name = (names[next_slot] or "").strip()
+                if not self._config.automation_enabled:
+                    suffix = "ready (paused)"
+                    color = KEY_YELLOW
+                elif self._key_sender is None or not self._key_sender.is_target_window_active():
+                    suffix = "ready (window)"
+                    color = KEY_YELLOW
+                else:
+                    suffix = "ready — next"
+                    color = KEY_GREEN
+                self._next_intention_row.set_content(keybind, slot_name, suffix, color)
+            else:
+                self._next_intention_row.set_content("—", "no action", "", "#555")
 
     def set_before_save_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Set a callback run before writing config (e.g. to sync baselines from analyzer)."""
