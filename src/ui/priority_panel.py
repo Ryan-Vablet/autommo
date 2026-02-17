@@ -513,6 +513,10 @@ class PriorityPanel(QWidget):
         """Set Next Intention to [keybind] — waiting (window)."""
         self._next_intention_label.setText(f"[{keybind}] — waiting (window)")
 
+    def stop_last_action_timer(self) -> None:
+        """Stop the 'Xs ago' timer (e.g. when automation is turned off)."""
+        self._last_action_timer.stop()
+
     @property
     def spin_min_delay(self) -> QSpinBox:
         return self._spin_min_delay

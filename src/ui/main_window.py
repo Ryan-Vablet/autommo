@@ -128,6 +128,8 @@ class MainWindow(QMainWindow):
         monitor_layout.addStretch(1)
         self._check_overlay = QCheckBox("Show Region Overlay")
         monitor_layout.addWidget(self._check_overlay)
+        self._check_always_on_top = QCheckBox("Always on top")
+        monitor_layout.addWidget(self._check_always_on_top)
         layout.addWidget(monitor_group)
 
         # --- Capture Region ---
@@ -276,6 +278,7 @@ class MainWindow(QMainWindow):
         self._spin_gap.valueChanged.connect(self._on_slot_layout_changed)
         self._spin_padding.valueChanged.connect(self._on_slot_layout_changed)
         self._check_overlay.toggled.connect(self._on_overlay_toggled)
+        self._check_always_on_top.toggled.connect(self._on_always_on_top_toggled)
         self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._btn_save_config.clicked.connect(self._save_config)
@@ -404,6 +407,14 @@ class MainWindow(QMainWindow):
         self.overlay_visibility_changed.emit(checked)
         self._update_save_button_state()
 
+    def _on_always_on_top_toggled(self, checked: bool) -> None:
+        flags = self.windowFlags()
+        if checked:
+            self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        self.show()
+
     def _on_slot_layout_changed(self) -> None:
         self._config.slot_count = self._spin_slots.value()
         self._config.slot_gap_pixels = self._spin_gap.value()
@@ -419,6 +430,8 @@ class MainWindow(QMainWindow):
 
     def _on_automation_toggled(self, checked: bool) -> None:
         self._config.automation_enabled = checked
+        if not checked:
+            self._priority_panel.stop_last_action_timer()
         self.config_changed.emit(self._config)
 
     def _on_automation_bind_captured(self, bind_str: str) -> None:
