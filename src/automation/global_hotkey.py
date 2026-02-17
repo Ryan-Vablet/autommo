@@ -1,4 +1,9 @@
-"""Global hotkey listener for automation toggle (works when app does not have focus)."""
+"""Global hotkey listener for automation toggle (works when app does not have focus).
+
+Uses the 'keyboard' library so the hotkey is detected even when a game has focus
+(games often consume input via DirectInput/Raw Input and block pynput-style hooks).
+Only keyboard keys are supported for the toggle bind (e.g. F24 from a mouse key).
+"""
 from __future__ import annotations
 
 import logging
@@ -7,6 +12,9 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
 logger = logging.getLogger(__name__)
+
+# Mouse button names we do not register as keyboard hotkeys
+_MOUSE_BIND_NAMES = frozenset({"x1", "x2", "left", "right", "middle"})
 
 
 def format_bind_for_display(bind: str) -> str:
@@ -30,8 +38,13 @@ def normalize_bind(bind: str) -> str:
     return bind.strip().lower() if bind else ""
 
 
+def _is_keyboard_bind(bind: str) -> bool:
+    """True if the bind is a keyboard key (we only listen for keyboard keys)."""
+    return bool(bind) and normalize_bind(bind) not in _MOUSE_BIND_NAMES
+
+
 class _ListenerThread(QThread):
-    """Thread that runs pynput listeners and emits when the configured key/button is pressed."""
+    """Thread that uses the keyboard library to listen for the configured key and emit when pressed."""
 
     triggered = pyqtSignal()
 
@@ -39,67 +52,55 @@ class _ListenerThread(QThread):
         super().__init__(parent)
         self._get_bind = get_bind
         self._running = True
-        self._k_listener = None
-        self._m_listener = None
+        self._hotkey_handler = None
 
     def run(self) -> None:
         try:
-            from pynput import keyboard, mouse
+            import keyboard
         except ImportError:
-            logger.warning("pynput not installed; global automation toggle hotkey disabled")
+            logger.warning(
+                "keyboard library not installed; global automation toggle hotkey disabled. "
+                "Install with: pip install keyboard"
+            )
             return
 
-        def on_key(key) -> bool:
-            if not self._running:
-                return False
-            try:
-                name = key.name if hasattr(key, "name") else (key.char or "")
-                if isinstance(name, str) and name:
-                    b = name.lower()
-                else:
-                    b = str(key).lower().replace("key.", "")
-                if normalize_bind(b) == normalize_bind(self._get_bind()):
-                    self.triggered.emit()
-            except Exception:
-                pass
-            return self._running
-
-        def on_click(x: int, y: int, button, pressed: bool) -> bool:
-            if not self._running or not pressed:
-                return self._running
-            try:
-                name = getattr(button, "name", str(button)).lower()
-                if normalize_bind(name) == normalize_bind(self._get_bind()):
-                    self.triggered.emit()
-            except Exception:
-                pass
-            return self._running
-
-        while self._running and not normalize_bind(self._get_bind()):
-            self.msleep(500)
-        if not self._running:
-            return
-
-        k_listener = keyboard.Listener(on_release=on_key)
-        m_listener = mouse.Listener(on_click=on_click)
-        self._k_listener = k_listener
-        self._m_listener = m_listener
-        k_listener.start()
-        m_listener.start()
         while self._running:
-            self.msleep(200)
-        try:
-            k_listener.stop()
-            m_listener.stop()
-        except Exception:
-            pass
+            bind = normalize_bind(self._get_bind())
+            if not _is_keyboard_bind(bind):
+                self.msleep(500)
+                continue
+            try:
+                if self._hotkey_handler is not None:
+                    try:
+                        keyboard.remove_hotkey(self._hotkey_handler)
+                    except Exception:
+                        pass
+                    self._hotkey_handler = None
+
+                def on_trigger():
+                    if self._running:
+                        self.triggered.emit()
+
+                self._hotkey_handler = keyboard.add_hotkey(bind, on_trigger)
+            except Exception as e:
+                logger.debug("keyboard add_hotkey failed for %r: %s", bind, e)
+
+            while self._running and normalize_bind(self._get_bind()) == bind and _is_keyboard_bind(bind):
+                self.msleep(200)
+
+        if self._hotkey_handler is not None:
+            try:
+                keyboard.remove_hotkey(self._hotkey_handler)
+            except Exception:
+                pass
+            self._hotkey_handler = None
 
     def stop(self) -> None:
         self._running = False
 
 
 class CaptureOneKeyThread(QThread):
-    """Captures the next key or mouse button press globally and emits it as a bind string."""
+    """Captures the next keyboard key press and emits it as a bind string (keyboard only)."""
 
     captured = pyqtSignal(str)
     cancelled = pyqtSignal()
@@ -107,59 +108,42 @@ class CaptureOneKeyThread(QThread):
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._done = False
+        self._hook = None
 
     def run(self) -> None:
         try:
-            from pynput import keyboard, mouse
+            import keyboard
         except ImportError:
             self.cancelled.emit()
             return
 
-        result: Optional[str] = None
+        result = [None]
 
-        def on_key(key) -> bool:
-            nonlocal result
-            if self._done:
-                return False
-            try:
-                if hasattr(key, "name") and key.name:
-                    result = key.name.lower()
-                elif hasattr(key, "char") and key.char:
-                    result = key.char.lower()
-                else:
-                    result = str(key).lower().replace("key.", "")
-                if result:
-                    self._done = True
-                    self.captured.emit(result)
-                return False
-            except Exception:
-                pass
-            return True
+        def on_event(event):
+            if self._done or result[0] is not None:
+                return
+            if event.event_type == keyboard.KEY_DOWN:
+                name = getattr(event, "name", None) or str(getattr(event, "scan_code", ""))
+                if name:
+                    result[0] = str(name).lower()
+                    if self._hook is not None:
+                        try:
+                            keyboard.unhook(self._hook)
+                        except Exception:
+                            pass
+                        self._hook = None
 
-        def on_click(x: int, y: int, button, pressed: bool) -> bool:
-            nonlocal result
-            if self._done or not pressed:
-                return not self._done
-            try:
-                result = getattr(button, "name", str(button)).lower()
-                if result == "left":
-                    return True
-                if result:
-                    self._done = True
-                    self.captured.emit(result)
-                return False
-            except Exception:
-                pass
-            return True
-
-        k_listener = keyboard.Listener(on_release=on_key)
-        m_listener = mouse.Listener(on_click=on_click)
-        k_listener.start()
-        m_listener.start()
-        while not self._done and (k_listener.running or m_listener.running):
+        self._hook = keyboard.hook(on_event)
+        while not self._done and result[0] is None:
             self.msleep(50)
-        k_listener.stop()
-        m_listener.stop()
+        if self._hook is not None:
+            try:
+                keyboard.unhook(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+        if result[0] is not None:
+            self.captured.emit(result[0])
 
     def cancel(self) -> None:
         self._done = True

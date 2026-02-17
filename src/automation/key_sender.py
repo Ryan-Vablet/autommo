@@ -72,10 +72,6 @@ class KeySender:
         return None
 
     def send_key(self, keybind: str) -> None:
-        """Actually send a keypress. Stub — will use pynput."""
-        # TODO: Implement with pynput
-        # from pynput.keyboard import Controller, Key
-        # keyboard = Controller()
-        # keyboard.press(keybind)
-        # keyboard.release(keybind)
+        """Actually send a keypress. Stub — will use keyboard library (keyboard.send)."""
+        # TODO: Implement with: import keyboard; keyboard.send(keybind)
         logger.debug(f"Would send key: {keybind}")
