@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QPushButton,
@@ -44,6 +45,7 @@ from src.ui.priority_panel import (
     PriorityPanel,
     SlotButton,
 )
+from src.automation.global_hotkey import CaptureOneKeyThread, format_bind_for_display
 
 if TYPE_CHECKING:
     from src.automation.key_sender import KeySender
@@ -131,6 +133,36 @@ class MainWindow(QMainWindow):
         self._check_always_on_top = QCheckBox("Always on top")
         monitor_layout.addWidget(self._check_always_on_top)
         layout.addWidget(monitor_group)
+
+        # --- Automation ---
+        automation_group = QGroupBox("Automation")
+        automation_layout = QVBoxLayout(automation_group)
+        automation_btn_row = QHBoxLayout()
+        self._btn_automation_toggle = QPushButton()
+        self._btn_automation_toggle.setMinimumHeight(32)
+        self._btn_automation_toggle.clicked.connect(self._on_automation_toggle_clicked)
+        automation_btn_row.addWidget(self._btn_automation_toggle)
+        automation_layout.addLayout(automation_btn_row)
+        # One row: Bind Toggle [key], Delay (ms), Window title
+        options_row = QHBoxLayout()
+        self._btn_rebind = QPushButton("Bind Toggle")
+        self._btn_rebind.setMinimumHeight(24)
+        self._btn_rebind.setMinimumWidth(170)  # fit "Bind Toggle [Mouse 4]" / "ESC to Cancel" without shrinking
+        self._btn_rebind.clicked.connect(self._on_rebind_clicked)
+        options_row.addWidget(self._btn_rebind)
+        options_row.addWidget(QLabel("Delay (ms):"))
+        self._spin_min_delay = QSpinBox()
+        self._spin_min_delay.setRange(50, 2000)
+        self._spin_min_delay.setMinimumWidth(70)
+        options_row.addWidget(self._spin_min_delay)
+        options_row.addWidget(QLabel("Window title:"))
+        self._edit_window_title = QLineEdit()
+        self._edit_window_title.setPlaceholderText("e.g. World of Warcraft")
+        self._edit_window_title.setClearButtonEnabled(True)
+        options_row.addWidget(self._edit_window_title)
+        automation_layout.addLayout(options_row)
+        layout.addWidget(automation_group)
+        self._capture_bind_thread: Optional[CaptureOneKeyThread] = None
 
         # --- Capture Region ---
         capture_group = QGroupBox("Capture Region")
@@ -282,11 +314,9 @@ class MainWindow(QMainWindow):
         self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._btn_save_config.clicked.connect(self._save_config)
-        self._priority_panel.automation_check.toggled.connect(self._on_automation_toggled)
+        self._spin_min_delay.valueChanged.connect(self._on_min_delay_changed)
+        self._edit_window_title.textChanged.connect(self._on_window_title_changed)
         self._priority_panel.priority_list.order_changed.connect(self._on_priority_order_changed)
-        self._priority_panel.bind_captured.connect(self._on_automation_bind_captured)
-        self._priority_panel.spin_min_delay.valueChanged.connect(self._on_min_delay_changed)
-        self._priority_panel.edit_window_title.textChanged.connect(self._on_window_title_changed)
 
     def _sync_ui_from_config(self) -> None:
         """Set UI controls to match current config."""
@@ -320,12 +350,16 @@ class MainWindow(QMainWindow):
         finally:
             self._spin_brightness_drop.blockSignals(False)
             self._slider_pixel_fraction.blockSignals(False)
-        self._priority_panel.automation_check.blockSignals(True)
+        self._config.automation_enabled = False
+        self._spin_min_delay.blockSignals(True)
+        self._edit_window_title.blockSignals(True)
         try:
-            self._config.automation_enabled = False
-            self._priority_panel.automation_check.setChecked(False)
+            self._spin_min_delay.setValue(getattr(self._config, "min_press_interval_ms", 150))
+            self._edit_window_title.setText(getattr(self._config, "target_window_title", ""))
         finally:
-            self._priority_panel.automation_check.blockSignals(False)
+            self._spin_min_delay.blockSignals(False)
+            self._edit_window_title.blockSignals(False)
+        self._update_automation_button_text()
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(getattr(self._config, "slot_display_names", []))
         self._priority_panel.priority_list.blockSignals(True)
@@ -333,9 +367,6 @@ class MainWindow(QMainWindow):
             self._priority_panel.priority_list.set_order(getattr(self._config, "priority_order", []))
         finally:
             self._priority_panel.priority_list.blockSignals(False)
-        self._priority_panel.set_toggle_bind(getattr(self._config, "automation_toggle_bind", ""))
-        self._priority_panel.set_min_delay_ms(getattr(self._config, "min_press_interval_ms", 150))
-        self._priority_panel.set_window_title(getattr(self._config, "target_window_title", ""))
         self._prepopulate_slot_buttons()
         if CONFIG_PATH.exists():
             self._last_saved_config = copy.deepcopy(self._config.to_dict())
@@ -428,16 +459,70 @@ class MainWindow(QMainWindow):
         self._prepopulate_slot_buttons()
         self._update_save_button_state()
 
-    def _on_automation_toggled(self, checked: bool) -> None:
-        self._config.automation_enabled = checked
-        if not checked:
+    def _update_automation_button_text(self) -> None:
+        """Set toggle button to Enable/Disable (green/red) and rebind button to Bind Toggle [key]."""
+        key = getattr(self._config, "automation_toggle_bind", "") or ""
+        display_key = format_bind_for_display(key) if key else "…"
+        if self._config.automation_enabled:
+            self._btn_automation_toggle.setText("Disable")
+            self._btn_automation_toggle.setStyleSheet(
+                "background-color: #5a2d2d; color: #e0b8b8; border: 1px solid #444; font-size: 12px; font-weight: bold;"
+            )
+        else:
+            self._btn_automation_toggle.setText("Enable")
+            self._btn_automation_toggle.setStyleSheet(
+                "background-color: #2d5a2d; color: #b8e0b8; border: 1px solid #444; font-size: 12px; font-weight: bold;"
+            )
+        self._btn_rebind.setText(f"Bind Toggle [{display_key}]")
+        self._btn_rebind.setStyleSheet("")  # reset from "Bind Toggle..." blue state
+
+    def _on_automation_toggle_clicked(self) -> None:
+        self._config.automation_enabled = not self._config.automation_enabled
+        if not self._config.automation_enabled:
             self._priority_panel.stop_last_action_timer()
+        self._update_automation_button_text()
         self.config_changed.emit(self._config)
 
-    def _on_automation_bind_captured(self, bind_str: str) -> None:
-        self._config.automation_toggle_bind = bind_str
+    def toggle_automation(self) -> None:
+        """Toggle automation on/off (e.g. from global hotkey)."""
+        self._config.automation_enabled = not self._config.automation_enabled
+        if not self._config.automation_enabled:
+            self._priority_panel.stop_last_action_timer()
+        self._update_automation_button_text()
+        self.config_changed.emit(self._config)
+
+    def _on_rebind_clicked(self) -> None:
+        if self._capture_bind_thread is not None and self._capture_bind_thread.isRunning():
+            return
+        self._btn_rebind.setText("ESC to Cancel")
+        self._btn_rebind.setStyleSheet("background-color: #2d2d5a; color: white;")
+        self._btn_rebind.setEnabled(False)
+        self._capture_bind_thread = CaptureOneKeyThread(self)
+        self._capture_bind_thread.captured.connect(self._on_rebind_captured)
+        self._capture_bind_thread.cancelled.connect(self._on_rebind_cancelled)
+        self._capture_bind_thread.finished.connect(self._on_rebind_finished)
+        self._capture_bind_thread.start()
+
+    def _on_rebind_captured(self, bind_str: str) -> None:
+        key = (bind_str or "").strip().lower()
+        if key in ("esc", "escape"):
+            self._on_rebind_cancelled()
+            return
+        self._config.automation_toggle_bind = (bind_str or "").strip()
+        self._update_automation_button_text()
         self.config_changed.emit(self._config)
         self._update_save_button_state()
+        self._btn_rebind.setEnabled(True)
+
+    def _on_rebind_cancelled(self) -> None:
+        self._update_automation_button_text()
+        self._btn_rebind.setEnabled(True)
+
+    def _on_rebind_finished(self) -> None:
+        self._capture_bind_thread = None
+        if self._btn_rebind.text() == "ESC to Cancel":
+            self._update_automation_button_text()
+            self._btn_rebind.setEnabled(True)
 
     def _on_min_delay_changed(self, value: int) -> None:
         self._config.min_press_interval_ms = max(50, min(2000, value))
@@ -445,7 +530,7 @@ class MainWindow(QMainWindow):
         self._update_save_button_state()
 
     def _on_window_title_changed(self) -> None:
-        self._config.target_window_title = self._priority_panel.get_window_title()
+        self._config.target_window_title = (self._edit_window_title.text() or "").strip()
         self.config_changed.emit(self._config)
         self._update_save_button_state()
 
@@ -585,7 +670,12 @@ class MainWindow(QMainWindow):
             )
 
     def keyPressEvent(self, event) -> None:
-        """Capture key when in bind mode: Esc cancels, any other key binds to the slot."""
+        """Capture key when in bind mode: Esc cancels, any other key binds to the slot. Esc also cancels Bind Toggle capture."""
+        if self._capture_bind_thread is not None and self._capture_bind_thread.isRunning():
+            if event.key() == Qt.Key.Key_Escape:
+                self._capture_bind_thread.cancel()
+                event.accept()
+                return
         if self._listening_slot_index is not None:
             if event.key() == Qt.Key.Key_Escape:
                 self._cancel_listening()
@@ -651,13 +741,17 @@ class MainWindow(QMainWindow):
                 else "?"
             )
             keybind = keybind or "?"
+            names = getattr(self._config, "slot_display_names", [])
+            slot_name = "Unidentified"
+            if next_slot < len(names) and (names[next_slot] or "").strip():
+                slot_name = (names[next_slot] or "").strip()
             if not self._config.automation_enabled:
                 suffix = "ready (paused)"
             elif self._key_sender is None or not self._key_sender.is_target_window_active():
                 suffix = "ready (window)"
             else:
                 suffix = "next"
-            self._priority_panel.next_intention_label.setText(f"[{keybind}] — {suffix}")
+            self._priority_panel.next_intention_label.setText(f"[{keybind}] {slot_name} — {suffix}")
         else:
             self._priority_panel.next_intention_label.setText("—")
 

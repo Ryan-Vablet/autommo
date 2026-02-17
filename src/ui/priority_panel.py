@@ -8,24 +8,17 @@ from typing import Optional
 from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QDrag, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from src.automation.global_hotkey import (
-    CaptureOneKeyThread,
-    format_bind_for_display,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -349,9 +342,7 @@ class PriorityListWidget(QWidget):
 
 
 class PriorityPanel(QWidget):
-    """Right-side panel: automation toggle, last action, next intention, priority list."""
-
-    bind_captured = pyqtSignal(str)
+    """Right-side panel: last action, next intention, priority list."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -360,39 +351,6 @@ class PriorityPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        automation_row = QHBoxLayout()
-        self._check_automation = QCheckBox("Automation")
-        self._check_automation.setChecked(False)
-        automation_row.addWidget(self._check_automation)
-        automation_row.addStretch()
-        self._toggle_bind_btn = QPushButton("Set")
-        self._toggle_bind_btn.setMaximumWidth(72)
-        self._toggle_bind_btn.setMinimumHeight(24)
-        self._toggle_bind_btn.clicked.connect(self._on_toggle_bind_clicked)
-        automation_row.addWidget(self._toggle_bind_btn)
-        layout.addLayout(automation_row)
-
-        self._toggle_bind_str = ""
-        self._capture_thread: Optional[CaptureOneKeyThread] = None
-        self._check_automation.toggled.connect(self._update_toggle_button_style)
-        self._update_toggle_button_style()
-
-        min_delay_row = QHBoxLayout()
-        min_delay_row.addWidget(QLabel("Min delay (ms):"))
-        self._spin_min_delay = QSpinBox()
-        self._spin_min_delay.setRange(50, 2000)
-        self._spin_min_delay.setValue(150)
-        self._spin_min_delay.setMinimumWidth(70)
-        min_delay_row.addWidget(self._spin_min_delay)
-        min_delay_row.addStretch()
-        layout.addLayout(min_delay_row)
-
-        layout.addWidget(QLabel("Window title:"))
-        self._edit_window_title = QLineEdit()
-        self._edit_window_title.setPlaceholderText("e.g. World of Warcraft")
-        self._edit_window_title.setClearButtonEnabled(True)
-        layout.addWidget(self._edit_window_title)
-
         last_action_group = QGroupBox("Last Action")
         last_action_layout = QVBoxLayout(last_action_group)
         self._last_action_label = QLabel("—")
@@ -400,6 +358,7 @@ class PriorityPanel(QWidget):
         last_action_layout.addWidget(self._last_action_label)
         layout.addWidget(last_action_group)
         self._last_action_keybind: Optional[str] = None
+        self._last_action_display_name: str = "Unidentified"
         self._last_action_timestamp: float = 0.0
         self._last_action_timer = QTimer(self)
         self._last_action_timer.setInterval(100)
@@ -418,57 +377,6 @@ class PriorityPanel(QWidget):
         priority_group_layout.addWidget(self._priority_list, 1)
         layout.addWidget(priority_group, 1)
 
-    def set_toggle_bind(self, bind_str: str) -> None:
-        """Set the displayed toggle key (e.g. after loading config or after capture)."""
-        self._toggle_bind_str = (bind_str or "").strip()
-        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
-        self._update_toggle_button_style()
-
-    def _update_toggle_button_style(self) -> None:
-        on = self._check_automation.isChecked()
-        if on:
-            self._toggle_bind_btn.setStyleSheet(
-                "background-color: #2d5a2d; color: #b8e0b8; border: 1px solid #444; font-size: 11px;"
-            )
-        else:
-            self._toggle_bind_btn.setStyleSheet(
-                "background-color: #3a3a3a; color: #aaa; border: 1px solid #555; font-size: 11px;"
-            )
-
-    def _on_toggle_bind_clicked(self) -> None:
-        if self._capture_thread is not None and self._capture_thread.isRunning():
-            return
-        self._toggle_bind_btn.setText("...")
-        self._toggle_bind_btn.setEnabled(False)
-        self._capture_thread = CaptureOneKeyThread(self)
-        self._capture_thread.captured.connect(self._on_bind_captured)
-        self._capture_thread.cancelled.connect(self._on_bind_capture_cancelled)
-        self._capture_thread.finished.connect(self._on_capture_thread_finished)
-        self._capture_thread.start()
-
-    def _on_bind_captured(self, bind_str: str) -> None:
-        self._toggle_bind_str = (bind_str or "").strip()
-        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
-        self._toggle_bind_btn.setEnabled(True)
-        self._update_toggle_button_style()
-        self.bind_captured.emit(self._toggle_bind_str)
-
-    def _on_bind_capture_cancelled(self) -> None:
-        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
-        self._toggle_bind_btn.setEnabled(True)
-        self._update_toggle_button_style()
-
-    def _on_capture_thread_finished(self) -> None:
-        self._capture_thread = None
-        if self._toggle_bind_btn.text() == "...":
-            self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
-            self._toggle_bind_btn.setEnabled(True)
-            self._update_toggle_button_style()
-
-    @property
-    def automation_check(self) -> QCheckBox:
-        return self._check_automation
-
     @property
     def last_action_label(self) -> QLabel:
         return self._last_action_label
@@ -481,23 +389,12 @@ class PriorityPanel(QWidget):
     def priority_list(self) -> PriorityListWidget:
         return self._priority_list
 
-    def set_min_delay_ms(self, value: int) -> None:
-        self._spin_min_delay.setValue(max(50, min(2000, value)))
-
-    def get_min_delay_ms(self) -> int:
-        return self._spin_min_delay.value()
-
-    def set_window_title(self, text: str) -> None:
-        self._edit_window_title.setText(text or "")
-
-    def get_window_title(self) -> str:
-        return (self._edit_window_title.text() or "").strip()
-
-    def update_last_action_sent(self, keybind: str, timestamp: float) -> None:
-        """Show [keybind] and start live 'Xs ago' timer."""
+    def update_last_action_sent(self, keybind: str, timestamp: float, display_name: str = "Unidentified") -> None:
+        """Show [keybind] display_name and start live 'Xs ago' timer."""
         self._last_action_keybind = keybind
+        self._last_action_display_name = display_name or "Unidentified"
         self._last_action_timestamp = timestamp
-        self._last_action_label.setText(f"[{keybind}]")
+        self._last_action_label.setText(f"[{keybind}] {self._last_action_display_name}")
         if not self._last_action_timer.isActive():
             self._last_action_timer.start()
         self._on_last_action_timer()
@@ -507,20 +404,13 @@ class PriorityPanel(QWidget):
             self._last_action_timer.stop()
             return
         elapsed = time.time() - self._last_action_timestamp
-        self._last_action_label.setText(f"[{self._last_action_keybind}]  {elapsed:.1f}s ago")
+        self._last_action_label.setText(f"[{self._last_action_keybind}] {self._last_action_display_name}  {elapsed:.1f}s ago")
 
-    def update_next_intention_blocked(self, keybind: str) -> None:
-        """Set Next Intention to [keybind] — waiting (window)."""
-        self._next_intention_label.setText(f"[{keybind}] — waiting (window)")
+    def update_next_intention_blocked(self, keybind: str, display_name: str = "Unidentified") -> None:
+        """Set Next Intention to [keybind] display_name — waiting (window)."""
+        name = display_name or "Unidentified"
+        self._next_intention_label.setText(f"[{keybind}] {name} — waiting (window)")
 
     def stop_last_action_timer(self) -> None:
         """Stop the 'Xs ago' timer (e.g. when automation is turned off)."""
         self._last_action_timer.stop()
-
-    @property
-    def spin_min_delay(self) -> QSpinBox:
-        return self._spin_min_delay
-
-    @property
-    def edit_window_title(self) -> QLineEdit:
-        return self._edit_window_title

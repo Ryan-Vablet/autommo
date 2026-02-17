@@ -85,7 +85,7 @@ class KeySender:
             keybind = keybind.strip()
 
             if not self.is_target_window_active():
-                return {"keybind": keybind, "action": "blocked", "reason": "window"}
+                return {"keybind": keybind, "action": "blocked", "reason": "window", "slot_index": slot_index}
 
             try:
                 import keyboard
@@ -96,6 +96,6 @@ class KeySender:
 
             self._last_send_time = now
             logger.info("Sent key: %s", keybind)
-            return {"keybind": keybind, "action": "sent", "timestamp": now}
+            return {"keybind": keybind, "action": "sent", "timestamp": now, "slot_index": slot_index}
 
         return None

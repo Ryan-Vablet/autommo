@@ -201,12 +201,17 @@ def main() -> None:
     worker.state_updated.connect(window.update_slot_states)
 
     def on_key_action(result: dict) -> None:
+        slot_index = result.get("slot_index")
+        names = getattr(config, "slot_display_names", [])
+        display_name = "Unidentified"
+        if slot_index is not None and slot_index < len(names) and (names[slot_index] or "").strip():
+            display_name = (names[slot_index] or "").strip()
         if result.get("action") == "sent":
             window._priority_panel.update_last_action_sent(
-                result["keybind"], result.get("timestamp", 0.0)
+                result["keybind"], result.get("timestamp", 0.0), display_name
             )
         elif result.get("action") == "blocked" and result.get("reason") == "window":
-            window._priority_panel.update_next_intention_blocked(result["keybind"])
+            window._priority_panel.update_next_intention_blocked(result["keybind"], display_name)
 
     worker.key_action.connect(on_key_action)
 
@@ -232,8 +237,7 @@ def main() -> None:
 
     # Global hotkey to toggle automation (works when app does not have focus)
     def on_global_toggle():
-        cb = window._priority_panel.automation_check
-        cb.setChecked(not cb.isChecked())
+        window.toggle_automation()
 
     hotkey_listener = GlobalToggleListener(get_bind=lambda: config.automation_toggle_bind)
     hotkey_listener.triggered.connect(on_global_toggle)
