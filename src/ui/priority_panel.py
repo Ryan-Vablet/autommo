@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QMimeData, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QDrag, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -12,9 +13,11 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -374,12 +377,33 @@ class PriorityPanel(QWidget):
         self._check_automation.toggled.connect(self._update_toggle_button_style)
         self._update_toggle_button_style()
 
+        min_delay_row = QHBoxLayout()
+        min_delay_row.addWidget(QLabel("Min delay (ms):"))
+        self._spin_min_delay = QSpinBox()
+        self._spin_min_delay.setRange(50, 2000)
+        self._spin_min_delay.setValue(150)
+        self._spin_min_delay.setMinimumWidth(70)
+        min_delay_row.addWidget(self._spin_min_delay)
+        min_delay_row.addStretch()
+        layout.addLayout(min_delay_row)
+
+        layout.addWidget(QLabel("Window title:"))
+        self._edit_window_title = QLineEdit()
+        self._edit_window_title.setPlaceholderText("e.g. World of Warcraft")
+        self._edit_window_title.setClearButtonEnabled(True)
+        layout.addWidget(self._edit_window_title)
+
         last_action_group = QGroupBox("Last Action")
         last_action_layout = QVBoxLayout(last_action_group)
         self._last_action_label = QLabel("—")
         self._last_action_label.setStyleSheet("color: #888; font-size: 11px;")
         last_action_layout.addWidget(self._last_action_label)
         layout.addWidget(last_action_group)
+        self._last_action_keybind: Optional[str] = None
+        self._last_action_timestamp: float = 0.0
+        self._last_action_timer = QTimer(self)
+        self._last_action_timer.setInterval(100)
+        self._last_action_timer.timeout.connect(self._on_last_action_timer)
 
         next_intention_group = QGroupBox("Next Intention")
         next_intention_layout = QVBoxLayout(next_intention_group)
@@ -456,3 +480,43 @@ class PriorityPanel(QWidget):
     @property
     def priority_list(self) -> PriorityListWidget:
         return self._priority_list
+
+    def set_min_delay_ms(self, value: int) -> None:
+        self._spin_min_delay.setValue(max(50, min(2000, value)))
+
+    def get_min_delay_ms(self) -> int:
+        return self._spin_min_delay.value()
+
+    def set_window_title(self, text: str) -> None:
+        self._edit_window_title.setText(text or "")
+
+    def get_window_title(self) -> str:
+        return (self._edit_window_title.text() or "").strip()
+
+    def update_last_action_sent(self, keybind: str, timestamp: float) -> None:
+        """Show [keybind] and start live 'Xs ago' timer."""
+        self._last_action_keybind = keybind
+        self._last_action_timestamp = timestamp
+        self._last_action_label.setText(f"[{keybind}]")
+        if not self._last_action_timer.isActive():
+            self._last_action_timer.start()
+        self._on_last_action_timer()
+
+    def _on_last_action_timer(self) -> None:
+        if self._last_action_keybind is None:
+            self._last_action_timer.stop()
+            return
+        elapsed = time.time() - self._last_action_timestamp
+        self._last_action_label.setText(f"[{self._last_action_keybind}]  {elapsed:.1f}s ago")
+
+    def update_next_intention_blocked(self, keybind: str) -> None:
+        """Set Next Intention to [keybind] — waiting (window)."""
+        self._next_intention_label.setText(f"[{keybind}] — waiting (window)")
+
+    @property
+    def spin_min_delay(self) -> QSpinBox:
+        return self._spin_min_delay
+
+    @property
+    def edit_window_title(self) -> QLineEdit:
+        return self._edit_window_title

@@ -1,3 +1,3 @@
-from .key_sender import KeySender, PriorityRule
+from .key_sender import KeySender
 
-__all__ = ["KeySender", "PriorityRule"]
+__all__ = ["KeySender"]

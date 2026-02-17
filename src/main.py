@@ -14,6 +14,7 @@ from PyQt6.QtCore import QRect, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.automation.global_hotkey import GlobalToggleListener
+from src.automation.key_sender import KeySender
 from src.capture import ScreenCapture
 from src.analysis import SlotAnalyzer
 from src.models import AppConfig, BoundingBox
@@ -57,11 +58,13 @@ class CaptureWorker(QThread):
 
     frame_captured = pyqtSignal(np.ndarray)          # Raw frame for preview
     state_updated = pyqtSignal(list)                  # List of slot state dicts
+    key_action = pyqtSignal(object)                   # Dict when a key was sent or blocked (action, keybind, etc.)
 
-    def __init__(self, analyzer: SlotAnalyzer, config: AppConfig):
+    def __init__(self, analyzer: SlotAnalyzer, config: AppConfig, key_sender=None):
         super().__init__()
         self._analyzer = analyzer
         self._config = config
+        self._key_sender = key_sender
         self._running = False
 
     def run(self) -> None:
@@ -93,6 +96,15 @@ class CaptureWorker(QThread):
                         for s in state.slots
                     ]
                     self.state_updated.emit(slot_dicts)
+                    if self._key_sender is not None:
+                        result = self._key_sender.evaluate_and_send(
+                            state,
+                            getattr(self._config, "priority_order", []),
+                            self._config.keybinds,
+                            getattr(self._config, "automation_enabled", False),
+                        )
+                        if result is not None:
+                            self.key_action.emit(result)
 
                 except Exception as e:
                     logger.error(f"Capture error: {e}", exc_info=True)
@@ -108,6 +120,8 @@ class CaptureWorker(QThread):
     def update_config(self, config: AppConfig) -> None:
         self._config = config
         self._analyzer.update_config(config)
+        if self._key_sender is not None:
+            self._key_sender.update_config(config)
 
 
 def load_config() -> AppConfig:
@@ -123,6 +137,7 @@ def load_config() -> AppConfig:
 
 def main() -> None:
     config = load_config()
+    config.automation_enabled = False
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -166,8 +181,14 @@ def main() -> None:
 
     capture.stop()
 
-    # --- Capture worker ---
-    worker = CaptureWorker(analyzer, config)
+    # --- Key sender and capture worker ---
+    key_sender = KeySender(config)
+    worker = CaptureWorker(analyzer, config, key_sender)
+    window.set_key_sender(key_sender)
+
+    def on_config_changed(new_config: AppConfig) -> None:
+        worker.update_config(new_config)
+        key_sender.update_config(new_config)
 
     # --- Wire signals ---
     window.bounding_box_changed.connect(overlay.update_bounding_box)
@@ -175,9 +196,19 @@ def main() -> None:
     window.overlay_visibility_changed.connect(
         lambda visible: overlay.show() if visible else overlay.hide()
     )
-    window.config_changed.connect(worker.update_config)
+    window.config_changed.connect(on_config_changed)
     worker.frame_captured.connect(window.update_preview)
     worker.state_updated.connect(window.update_slot_states)
+
+    def on_key_action(result: dict) -> None:
+        if result.get("action") == "sent":
+            window._priority_panel.update_last_action_sent(
+                result["keybind"], result.get("timestamp", 0.0)
+            )
+        elif result.get("action") == "blocked" and result.get("reason") == "window":
+            window._priority_panel.update_next_intention_blocked(result["keybind"])
+
+    worker.key_action.connect(on_key_action)
 
     # Emit initial slot layout so overlay draws slot outlines
     window.slot_layout_changed.emit(

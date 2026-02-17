@@ -14,7 +14,7 @@ import copy
 import json
 import logging
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QKeySequence, QFont
@@ -44,6 +44,9 @@ from src.ui.priority_panel import (
     PriorityPanel,
     SlotButton,
 )
+
+if TYPE_CHECKING:
+    from src.automation.key_sender import KeySender
 
 
 class _LeftPanel(QWidget):
@@ -91,6 +94,7 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._config = config
+        self._key_sender: Optional["KeySender"] = None
         self._listening_slot_index: Optional[int] = None
         # Slots whose baseline was set by "Calibrate This Slot" (show bold; persisted in config)
         self._slots_recalibrated: set[int] = set(getattr(config, "overwritten_baseline_slots", []))
@@ -278,6 +282,8 @@ class MainWindow(QMainWindow):
         self._priority_panel.automation_check.toggled.connect(self._on_automation_toggled)
         self._priority_panel.priority_list.order_changed.connect(self._on_priority_order_changed)
         self._priority_panel.bind_captured.connect(self._on_automation_bind_captured)
+        self._priority_panel.spin_min_delay.valueChanged.connect(self._on_min_delay_changed)
+        self._priority_panel.edit_window_title.textChanged.connect(self._on_window_title_changed)
 
     def _sync_ui_from_config(self) -> None:
         """Set UI controls to match current config."""
@@ -325,6 +331,8 @@ class MainWindow(QMainWindow):
         finally:
             self._priority_panel.priority_list.blockSignals(False)
         self._priority_panel.set_toggle_bind(getattr(self._config, "automation_toggle_bind", ""))
+        self._priority_panel.set_min_delay_ms(getattr(self._config, "min_press_interval_ms", 150))
+        self._priority_panel.set_window_title(getattr(self._config, "target_window_title", ""))
         self._prepopulate_slot_buttons()
         if CONFIG_PATH.exists():
             self._last_saved_config = copy.deepcopy(self._config.to_dict())
@@ -417,6 +425,19 @@ class MainWindow(QMainWindow):
         self._config.automation_toggle_bind = bind_str
         self.config_changed.emit(self._config)
         self._update_save_button_state()
+
+    def _on_min_delay_changed(self, value: int) -> None:
+        self._config.min_press_interval_ms = max(50, min(2000, value))
+        self.config_changed.emit(self._config)
+        self._update_save_button_state()
+
+    def _on_window_title_changed(self) -> None:
+        self._config.target_window_title = self._priority_panel.get_window_title()
+        self.config_changed.emit(self._config)
+        self._update_save_button_state()
+
+    def set_key_sender(self, key_sender: Optional["KeySender"]) -> None:
+        self._key_sender = key_sender
 
     def _on_priority_order_changed(self, order: list) -> None:
         self._config.priority_order = list(order)
@@ -610,13 +631,20 @@ class MainWindow(QMainWindow):
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.update_states(states)
         next_slot = self._next_ready_priority_slot(states)
-        if next_slot is not None and self._config.automation_enabled:
+        if next_slot is not None:
             keybind = (
                 self._config.keybinds[next_slot]
                 if next_slot < len(self._config.keybinds)
                 else "?"
             )
-            self._priority_panel.next_intention_label.setText(f"[{keybind or '?'}] — ready")
+            keybind = keybind or "?"
+            if not self._config.automation_enabled:
+                suffix = "ready (paused)"
+            elif self._key_sender is None or not self._key_sender.is_target_window_active():
+                suffix = "ready (window)"
+            else:
+                suffix = "next"
+            self._priority_panel.next_intention_label.setText(f"[{keybind}] — {suffix}")
         else:
             self._priority_panel.next_intention_label.setText("—")
 

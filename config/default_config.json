@@ -127,5 +127,7 @@
     2
   ],
   "automation_enabled": false,
-  "automation_toggle_bind": "]"
+  "automation_toggle_bind": "f24",
+  "min_press_interval_ms": 150,
+  "target_window_title": ""
 }

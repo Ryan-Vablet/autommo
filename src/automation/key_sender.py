@@ -1,77 +1,101 @@
-"""Key sender — sends keypresses based on slot states and priority rules.
-
-FUTURE SCOPE: This module is a stub. The interface is designed so that
-a rule engine can be plugged in later.
-
-Planned features:
-- Priority-ordered list of keybinds to press when ready
-- Minimum delay between keypresses (to avoid spam)
-- GCD awareness (don't press during GCD)
-- Conditional rules (e.g., "only press 5 if slot 3 is on cooldown")
-"""
+"""Key sender — sends keypresses based on slot states and priority order."""
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Optional
+import sys
+import time
+from typing import TYPE_CHECKING, Optional
 
-from src.models import ActionBarState
+if TYPE_CHECKING:
+    from src.models import AppConfig
+
+from src.models import ActionBarState, SlotState
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PriorityRule:
-    """A single priority rule: press this keybind when the slot is ready."""
-    keybind: str
-    slot_index: int
-    priority: int  # Lower = higher priority
-    enabled: bool = True
-    # Future: conditions like "only if slot X is on cooldown"
-    conditions: list = field(default_factory=list)
+def _is_target_window_active_win(target_title: str) -> bool:
+    """Windows: True if foreground window title contains target_title (case-insensitive), or if target_title is empty."""
+    if not (target_title or "").strip():
+        return True
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        length = user32.GetWindowTextLengthW(hwnd) + 1
+        buf = ctypes.create_unicode_buffer(length)
+        user32.GetWindowTextW(hwnd, buf, length)
+        foreground = buf.value or ""
+        return target_title.strip().lower() in foreground.lower()
+    except Exception as e:
+        logger.debug("Foreground window check failed: %s", e)
+        return False
+
+
+def is_target_window_active(target_window_title: str) -> bool:
+    """True if we may send keys (target window focused or no target set)."""
+    if sys.platform != "win32":
+        return True
+    return _is_target_window_active_win(target_window_title or "")
 
 
 class KeySender:
-    """Sends keypresses based on action bar state and priority rules."""
+    """Sends keypresses for the first READY slot in priority order, with min delay and optional window check."""
 
-    def __init__(self):
-        self._rules: list[PriorityRule] = []
-        self._enabled = False
-        self._min_delay_ms = 100  # Minimum ms between key sends
+    def __init__(self, config: "AppConfig"):
+        self._config = config
         self._last_send_time = 0.0
 
-    def set_rules(self, rules: list[PriorityRule]) -> None:
-        """Set the priority rules, sorted by priority."""
-        self._rules = sorted(rules, key=lambda r: r.priority)
+    def update_config(self, config: "AppConfig") -> None:
+        self._config = config
 
-    def enable(self) -> None:
-        self._enabled = True
-        logger.info("KeySender enabled")
+    def is_target_window_active(self) -> bool:
+        """True if foreground window matches target_window_title, or target is empty."""
+        return is_target_window_active(getattr(self._config, "target_window_title", "") or "")
 
-    def disable(self) -> None:
-        self._enabled = False
-        logger.info("KeySender disabled")
-
-    def evaluate(self, state: ActionBarState) -> Optional[str]:
-        """Given current action bar state, determine which key (if any) to press.
-
-        Returns the keybind string to press, or None.
-        Does NOT actually send the key — caller is responsible for that.
+    def evaluate_and_send(
+        self,
+        state: ActionBarState,
+        priority_order: list[int],
+        keybinds: list[str],
+        automation_enabled: bool,
+    ) -> Optional[dict]:
         """
-        if not self._enabled:
+        If automation enabled, find first READY slot in priority_order and send its keybind (subject to
+        min delay and target window). Returns None if nothing sent/blocked; otherwise a dict for the UI.
+        """
+        if not automation_enabled:
             return None
 
-        for rule in self._rules:
-            if not rule.enabled:
+        min_interval_sec = (getattr(self._config, "min_press_interval_ms", 150) or 150) / 1000.0
+        now = time.time()
+        if now - self._last_send_time < min_interval_sec:
+            return None
+
+        slots_by_index = {s.index: s for s in state.slots}
+        for slot_index in priority_order:
+            slot = slots_by_index.get(slot_index)
+            if not slot or slot.state != SlotState.READY:
                 continue
-            slot = next((s for s in state.slots if s.index == rule.slot_index), None)
-            if slot and slot.is_ready:
-                # TODO: Check conditions
-                return rule.keybind
+            keybind = keybinds[slot_index] if slot_index < len(keybinds) else None
+            if not (keybind or "").strip():
+                continue
+            keybind = keybind.strip()
+
+            if not self.is_target_window_active():
+                return {"keybind": keybind, "action": "blocked", "reason": "window"}
+
+            try:
+                import keyboard
+                keyboard.send(keybind)
+            except Exception as e:
+                logger.warning("keyboard.send(%r) failed: %s", keybind, e)
+                return None
+
+            self._last_send_time = now
+            logger.info("Sent key: %s", keybind)
+            return {"keybind": keybind, "action": "sent", "timestamp": now}
 
         return None
-
-    def send_key(self, keybind: str) -> None:
-        """Actually send a keypress. Stub — will use keyboard library (keyboard.send)."""
-        # TODO: Implement with: import keyboard; keyboard.send(keybind)
-        logger.debug(f"Would send key: {keybind}")

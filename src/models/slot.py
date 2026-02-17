@@ -103,6 +103,10 @@ class AppConfig:
     automation_enabled: bool = False
     # Global hotkey to toggle automation (e.g. "f5", "x1" for mouse side button); empty = not set
     automation_toggle_bind: str = ""
+    # Minimum ms between keypresses when automation is sending keys
+    min_press_interval_ms: int = 150
+    # If non-empty, only send keys when foreground window title contains this (case-insensitive)
+    target_window_title: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
@@ -131,6 +135,8 @@ class AppConfig:
             priority_order=data.get("priority_order", []),
             automation_enabled=data.get("automation_enabled", False),
             automation_toggle_bind=data.get("automation_toggle_bind", ""),
+            min_press_interval_ms=data.get("min_press_interval_ms", 150),
+            target_window_title=data.get("target_window_title", ""),
         )
 
     def to_dict(self) -> dict:
@@ -162,4 +168,6 @@ class AppConfig:
             "priority_order": self.priority_order,
             "automation_enabled": self.automation_enabled,
             "automation_toggle_bind": self.automation_toggle_bind,
+            "min_press_interval_ms": self.min_press_interval_ms,
+            "target_window_title": self.target_window_title,
         }
