@@ -139,9 +139,10 @@ class _ActionEntryRow(QWidget):
         super().__init__(parent)
         self.setObjectName("actionEntryRow")
         self.setStyleSheet(f"background: {SECTION_BG}; border-radius: 3px; padding: 4px 6px;")
-        self.setMinimumHeight(36)
+        self.setMinimumHeight(52)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
         self._key_label = QLabel(key)
         self._key_label.setObjectName("actionKey")
@@ -149,18 +150,18 @@ class _ActionEntryRow(QWidget):
         self._key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._key_label)
         info = QVBoxLayout()
-        info.setSpacing(0)
+        info.setSpacing(2)
         self._name_label = QLabel(name)
         self._name_label.setObjectName("actionName")
         self._name_label.setStyleSheet("font-size: 11px; color: #ccc;")
         self._name_label.setMinimumWidth(0)
-        self._name_label.setMinimumHeight(14)
+        self._name_label.setMinimumHeight(18)
         self._name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        self._name_label.setWordWrap(False)
+        self._name_label.setWordWrap(True)
         info.addWidget(self._name_label)
         self._status_label = QLabel(status)
         self._status_label.setObjectName("actionMeta")
-        self._status_label.setMinimumHeight(12)
+        self._status_label.setMinimumHeight(14)
         self._status_label.setStyleSheet("font-size: 9px; color: #666; font-family: monospace;")
         info.addWidget(self._status_label)
         layout.addLayout(info, 1)
@@ -181,15 +182,13 @@ class _ActionEntryRow(QWidget):
 
 
 class LastActionHistoryWidget(QWidget):
-    """Last Action section: list of sent actions with fading and live time updates."""
+    """Last Action section: sent actions with fixed duration (time to fire). N placeholder rows when empty; no live counter."""
 
     def __init__(self, max_rows: int = 3, parent: Optional[QWidget] = None, show_title: bool = True):
         super().__init__(parent)
         self._max_rows = max(1, max_rows)
-        self._entries: list[tuple[QWidget, float, QGraphicsOpacityEffect]] = []  # (row, timestamp, opacity_effect)
-        self._timer = QTimer(self)
-        self._timer.setInterval(100)
-        self._timer.timeout.connect(self._update_times)
+        self._entries: list[tuple[QWidget, QGraphicsOpacityEffect]] = []  # (row, opacity_effect) — time is fixed per row
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
@@ -203,43 +202,54 @@ class LastActionHistoryWidget(QWidget):
         self._rows_container = QVBoxLayout()
         self._rows_container.setSpacing(4)
         layout.addLayout(self._rows_container)
-        self._empty_row = _ActionEntryRow("—", "waiting…", "", "", key_color="#555", parent=self)
-        self._empty_row.setStyleSheet(self._empty_row.styleSheet() + " opacity: 0.7;")
-        self._rows_container.addWidget(self._empty_row)
+        self._placeholder_rows: list[QWidget] = []
+        for _ in range(self._max_rows):
+            ph = _ActionEntryRow("—", "No actions recorded", "", "", key_color="#555", parent=self)
+            ph.setStyleSheet(ph.styleSheet() + " opacity: 0.7;")
+            self._placeholder_rows.append(ph)
+            self._rows_container.addWidget(ph)
 
     def set_max_rows(self, n: int) -> None:
-        self._max_rows = max(1, min(10, n))
-        while len(self._entries) > self._max_rows:
-            row, _, eff = self._entries.pop()
-            row.deleteLater()
+        n = max(1, min(10, n))
+        if n < self._max_rows:
+            for i in range(self._max_rows - n):
+                ph = self._placeholder_rows.pop()
+                self._rows_container.removeWidget(ph)
+                ph.deleteLater()
+            while len(self._entries) > n:
+                row, eff = self._entries.pop()
+                self._rows_container.removeWidget(row)
+                row.deleteLater()
+        elif n > self._max_rows:
+            for i in range(n - self._max_rows):
+                ph = _ActionEntryRow("—", "No actions recorded", "", "", key_color="#555", parent=self)
+                ph.setStyleSheet(ph.styleSheet() + " opacity: 0.7;")
+                self._placeholder_rows.append(ph)
+                self._rows_container.addWidget(ph)
+        self._max_rows = n
+        for i, ph in enumerate(self._placeholder_rows):
+            ph.setVisible(i >= len(self._entries))
         self._update_opacities()
 
-    def add_entry(self, keybind: str, display_name: str, timestamp: float) -> None:
-        self._empty_row.hide()
-        row = _ActionEntryRow(keybind, display_name or "Unidentified", "sent", "0.0s", KEY_CYAN, self)
+    def add_entry(self, keybind: str, display_name: str, duration_seconds: float) -> None:
+        """Add a sent action; duration_seconds is shown once (time since previous fire), not updated."""
+        row = _ActionEntryRow(keybind, display_name or "Unidentified", "sent", f"{duration_seconds:.1f}s", KEY_CYAN, self)
         eff = QGraphicsOpacityEffect(self)
         row.setGraphicsEffect(eff)
-        self._entries.insert(0, (row, timestamp, eff))
+        self._entries.insert(0, (row, eff))
         self._rows_container.insertWidget(0, row)
+        for i in range(min(len(self._entries), len(self._placeholder_rows))):
+            self._placeholder_rows[i].hide()
         while len(self._entries) > self._max_rows:
-            old_row, _, old_eff = self._entries.pop()
+            old_row, old_eff = self._entries.pop()
+            self._rows_container.removeWidget(old_row)
             old_row.deleteLater()
-        self._update_times()
+            if len(self._entries) < len(self._placeholder_rows):
+                self._placeholder_rows[len(self._entries)].show()
         self._update_opacities()
-        if not self._timer.isActive():
-            self._timer.start()
-
-    def _update_times(self) -> None:
-        now = time.time()
-        for row, ts, _ in self._entries:
-            elapsed = now - ts
-            row.set_time(f"{elapsed:.1f}s")
-        if not self._entries:
-            self._timer.stop()
-            self._empty_row.show()
 
     def _update_opacities(self) -> None:
-        for i, (row, _, eff) in enumerate(self._entries):
+        for i, (row, eff) in enumerate(self._entries):
             op = max(0.2, 1.0 - (i * 0.25))
             eff.setOpacity(op)
 
@@ -272,9 +282,11 @@ class MainWindow(QMainWindow):
         self._slots_recalibrated: set[int] = set(getattr(config, "overwritten_baseline_slots", []))
         self._before_save_callback: Optional[Callable[[], None]] = None
         self._last_saved_config: Optional[dict] = None
+        self._last_action_sent_time: Optional[float] = None  # for "time since last fire" on Next Intention + duration for new Last Action
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(580, 400)
-        self.resize(800, 600)
+        # Default height: fit full layout without main scrollbar (generous for DPI/fonts)
+        self.resize(800, 700)
 
         self._build_ui()
         _qss = _load_main_window_theme()
@@ -290,6 +302,9 @@ class MainWindow(QMainWindow):
         self._gcd_label = QLabel("Est. GCD: —")
         self._gcd_label.setStyleSheet("font-size: 10px; font-family: monospace; color: #555;")
         self.statusBar().addPermanentWidget(self._gcd_label)
+        self._next_intention_timer = QTimer(self)
+        self._next_intention_timer.setInterval(100)
+        self._next_intention_timer.timeout.connect(self._update_next_intention_time)
         self._connect_signals()
         self._sync_ui_from_config()
 
@@ -393,7 +408,7 @@ class MainWindow(QMainWindow):
         self._last_action_history.setStyleSheet("background: transparent;")
         self._last_action_history.setMinimumHeight(80)
         last_action_inner.addWidget(self._last_action_history)
-        last_action_frame.setMinimumHeight(126)
+        last_action_frame.setMinimumHeight(140)
         last_action_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         left_layout.addWidget(last_action_frame)
         left_layout.addStretch(1)
@@ -410,7 +425,7 @@ class MainWindow(QMainWindow):
         next_inner.addWidget(title_next)
         self._next_intention_row = _ActionEntryRow("—", "no action", "", "", key_color="#555", parent=next_frame)
         next_inner.addWidget(self._next_intention_row)
-        next_frame.setMinimumHeight(82)
+        next_frame.setMinimumHeight(28 + 16 + 52)
         next_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         left_layout.addWidget(next_frame)
         left_layout.addStretch(1)
@@ -584,8 +599,11 @@ class MainWindow(QMainWindow):
         self._gcd_label.setText(f"Est. GCD: {gcd_seconds:.2f}s")
 
     def record_last_action_sent(self, keybind: str, timestamp: float, display_name: str = "Unidentified") -> None:
-        """Record a sent action in the Last Action history and for GCD estimation."""
-        self._last_action_history.add_entry(keybind, display_name or "Unidentified", timestamp)
+        """Record a sent action. Duration = time since previous action (only reset here, never when intention appears)."""
+        # Elapsed is time between actions; we only update _last_action_sent_time when an action is actually sent
+        elapsed = (timestamp - self._last_action_sent_time) if self._last_action_sent_time is not None else 0.0
+        self._last_action_history.add_entry(keybind, display_name or "Unidentified", elapsed)
+        self._last_action_sent_time = timestamp  # reset only on send; Next Intention counter uses this
         self._priority_panel.record_send_timestamp(timestamp)
 
     def set_next_intention_blocked(self, keybind: str, display_name: str = "Unidentified") -> None:
@@ -605,6 +623,19 @@ class MainWindow(QMainWindow):
     def set_capture_running(self, running: bool) -> None:
         """Show Last Action + Next Intention when capture is running; otherwise show the centered play placeholder."""
         self._scroll_content_stack.setCurrentIndex(1 if running else 0)
+        if running:
+            self._last_action_sent_time = time.time()
+            self._next_intention_timer.start()
+            self._update_next_intention_time()
+        else:
+            self._next_intention_timer.stop()
+            self._last_action_sent_time = None
+            self._next_intention_row.set_time("")
+
+    def _update_next_intention_time(self) -> None:
+        """Live counter: time since last action sent. Only resets when an action is sent (record_last_action_sent), not when intention appears."""
+        if self._last_action_sent_time is not None:
+            self._next_intention_row.set_time(f"{time.time() - self._last_action_sent_time:.1f}s")
 
     def update_preview(self, frame: np.ndarray) -> None:
         """Update the live preview with a captured frame (BGR numpy array).
