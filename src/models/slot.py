@@ -91,6 +91,7 @@ class AppConfig:
     ocr_enabled: bool = True
     overlay_enabled: bool = True
     overlay_border_color: str = "#00FF00"
+    always_on_top: bool = False
     keybinds: list[str] = field(default_factory=list)  # keybinds[slot_index] = key string, e.g. "5", "F"
     # User-defined display names per slot (e.g. "Fireball"); empty/missing = "Unidentified"
     slot_display_names: list[str] = field(default_factory=list)
@@ -109,6 +110,8 @@ class AppConfig:
     target_window_title: str = ""
     # Profile name (e.g. "Default") to distinguish which profile is loaded; used for export default filename
     profile_name: str = ""
+    # Number of visible entries in Last Action history (1-10)
+    history_rows: int = 3
 
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
@@ -130,6 +133,7 @@ class AppConfig:
             ocr_enabled=data.get("detection", {}).get("ocr_enabled", True),
             overlay_enabled=data.get("overlay", {}).get("enabled", True),
             overlay_border_color=data.get("overlay", {}).get("border_color", "#00FF00"),
+            always_on_top=data.get("display", {}).get("always_on_top", False),
             keybinds=data.get("slots", {}).get("keybinds", []),
             slot_display_names=data.get("slot_display_names", []),
             slot_baselines=data.get("slot_baselines", []),
@@ -140,6 +144,7 @@ class AppConfig:
             min_press_interval_ms=data.get("min_press_interval_ms", 150),
             target_window_title=data.get("target_window_title", ""),
             profile_name=data.get("profile_name", ""),
+            history_rows=data.get("history_rows", 3),
         )
 
     def to_dict(self) -> dict:
@@ -166,6 +171,7 @@ class AppConfig:
                 "enabled": self.overlay_enabled,
                 "border_color": self.overlay_border_color,
             },
+            "display": {"always_on_top": self.always_on_top},
             "slot_baselines": self.slot_baselines,
             "overwritten_baseline_slots": self.overwritten_baseline_slots,
             "priority_order": self.priority_order,
@@ -174,4 +180,5 @@ class AppConfig:
             "min_press_interval_ms": self.min_press_interval_ms,
             "target_window_title": self.target_window_title,
             "profile_name": self.profile_name,
+            "history_rows": self.history_rows,
         }

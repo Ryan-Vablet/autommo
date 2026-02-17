@@ -11,7 +11,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QRect, QThread, QTimer, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QRect, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -22,6 +22,7 @@ from src.analysis import SlotAnalyzer
 from src.models import AppConfig, BoundingBox
 from src.overlay import CalibrationOverlay
 from src.ui import MainWindow
+from src.ui.settings_dialog import SettingsDialog
 
 import numpy as np
 
@@ -195,10 +196,17 @@ def main() -> None:
         config.slot_baselines = encode_baselines(analyzer.get_baselines())
 
     window.set_before_save_callback(sync_baselines_to_config)
+
+    # --- Settings dialog (single instance, non-modal; close = hide) ---
+    settings_dialog = SettingsDialog(config, before_save_callback=sync_baselines_to_config, parent=window)
+
     # Short-lived mss on main thread for monitor list and overlay setup
     capture = ScreenCapture(monitor_index=config.monitor_index)
     capture.start()
-    window.populate_monitors(capture.list_monitors())
+    monitors = capture.list_monitors()
+    settings_dialog.populate_monitors(monitors)
+    if getattr(config, "always_on_top", False):
+        window.setWindowFlags(window.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
     window.show()
 
     # --- Calibration overlay ---
@@ -221,18 +229,28 @@ def main() -> None:
     def on_config_changed(new_config: AppConfig) -> None:
         worker.update_config(new_config)
         key_sender.update_config(new_config)
+        window.refresh_from_config()
+        # Apply always-on-top to main window when changed from Settings
+        flags = window.windowFlags()
+        if getattr(new_config, "always_on_top", False):
+            window.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+        else:
+            window.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+        window.show()
 
-    # --- Wire signals ---
-    window.bounding_box_changed.connect(overlay.update_bounding_box)
-    window.slot_layout_changed.connect(overlay.update_slot_layout)
-    window.overlay_visibility_changed.connect(
-        lambda visible: overlay.show() if visible else overlay.hide()
-    )
-    window.monitor_changed.connect(
-        lambda monitor_index: overlay.update_monitor_geometry(
-            monitor_rect_for_index(monitor_index, monitors)
-        )
-    )
+    # --- Wire signals: only Settings dialog drives overlay/bbox/slots (main window no longer has those controls) ---
+    def apply_overlay_visibility(visible: bool) -> None:
+        overlay.show() if visible else overlay.hide()
+
+    def apply_monitor(monitor_index: int) -> None:
+        overlay.update_monitor_geometry(monitor_rect_for_index(monitor_index, monitors))
+
+    settings_dialog.bounding_box_changed.connect(overlay.update_bounding_box)
+    settings_dialog.slot_layout_changed.connect(overlay.update_slot_layout)
+    settings_dialog.overlay_visibility_changed.connect(apply_overlay_visibility)
+    settings_dialog.monitor_changed.connect(apply_monitor)
+    settings_dialog.config_updated.connect(on_config_changed)
+
     window.config_changed.connect(on_config_changed)
     worker.frame_captured.connect(window.update_preview)
     worker.state_updated.connect(window.update_slot_states)
@@ -248,20 +266,16 @@ def main() -> None:
         ):
             display_name = (names[slot_index] or "").strip()
         if result.get("action") == "sent":
-            window._priority_panel.update_last_action_sent(
+            window.record_last_action_sent(
                 result["keybind"], result.get("timestamp", 0.0), display_name
             )
         elif result.get("action") == "blocked" and result.get("reason") == "window":
-            window._priority_panel.update_next_intention_blocked(
-                result["keybind"], display_name
-            )
+            window.set_next_intention_blocked(result["keybind"], display_name)
 
     worker.key_action.connect(on_key_action)
 
-    # Emit initial slot layout so overlay draws slot outlines
-    window.slot_layout_changed.emit(
-        config.slot_count, config.slot_gap_pixels, config.slot_padding
-    )
+    # Emit initial slot layout so overlay draws slot outlines (from config; no window control)
+    overlay.update_slot_layout(config.slot_count, config.slot_gap_pixels, config.slot_padding)
 
     # Start/stop capture via button
     is_running = [False]
@@ -269,14 +283,25 @@ def main() -> None:
     def toggle_capture():
         if is_running[0]:
             worker.stop()
-            window._btn_start.setText("Start Capture")
+            window._btn_start.setText("▶ Start Capture")
+            window.set_capture_running(False)
             is_running[0] = False
         else:
             worker.start()
-            window._btn_start.setText("Stop Capture")
+            window._btn_start.setText("⏹ Stop Capture")
+            window.set_capture_running(True)
             is_running[0] = True
 
     window._btn_start.clicked.connect(toggle_capture)
+
+    def on_start_capture_requested():
+        if not is_running[0]:
+            worker.start()
+            window._btn_start.setText("⏹ Stop Capture")
+            window.set_capture_running(True)
+            is_running[0] = True
+
+    window.start_capture_requested.connect(on_start_capture_requested)
 
     # Global hotkey to toggle automation (works when app does not have focus)
     def on_global_toggle():
@@ -289,11 +314,12 @@ def main() -> None:
     hotkey_listener.start()
 
     # Calibrate baselines: grab one frame on main thread with short-lived mss
-    def revert_calibrate_button():
-        window._btn_calibrate.setText("Calibrate Baselines")
-        window._btn_calibrate.setStyleSheet("")
+    def revert_calibrate_button(btn):
+        btn.setText("Calibrate All Baselines")
+        btn.setStyleSheet("")
 
-    def calibrate_baselines():
+    def calibrate_baselines(button_to_update):
+        btn = button_to_update
         baselines = analyzer.get_baselines()
         if baselines:
             reply = QMessageBox.question(
@@ -312,17 +338,18 @@ def main() -> None:
             cap.stop()
             analyzer.calibrate_baselines(frame)
             logger.info("Baselines calibrated from current frame")
+            sync_baselines_to_config()  # Update config in memory so baselines are not lost when switching windows
             window.clear_overwritten_baseline_slots()
-            window._btn_calibrate.setText("Calibrated ✓")
-            window._btn_calibrate.setStyleSheet("")
-            QTimer.singleShot(2000, revert_calibrate_button)
+            btn.setText("Calibrated ✓")
+            btn.setStyleSheet("")
+            QTimer.singleShot(2000, lambda: revert_calibrate_button(btn))
         except Exception as e:
             logger.error(f"Calibration failed: {e}")
-            window._btn_calibrate.setText("Calibration Failed")
-            window._btn_calibrate.setStyleSheet("color: red;")
-            QTimer.singleShot(2000, revert_calibrate_button)
+            btn.setText("Calibration Failed")
+            btn.setStyleSheet("color: red;")
+            QTimer.singleShot(2000, lambda: revert_calibrate_button(btn))
 
-    window._btn_calibrate.clicked.connect(calibrate_baselines)
+    settings_dialog.calibrate_requested.connect(lambda: calibrate_baselines(settings_dialog._btn_calibrate))
 
     def calibrate_single_slot(slot_index: int) -> None:
         try:
@@ -338,6 +365,9 @@ def main() -> None:
             window.show_status_message(f"Calibration failed: {e}", 2000)
 
     window.calibrate_slot_requested.connect(calibrate_single_slot)
+
+    # Settings button opens or raises the settings dialog
+    window._btn_settings.clicked.connect(settings_dialog.show_or_raise)
 
     # --- Run ---
     exit_code = app.exec()

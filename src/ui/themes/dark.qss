@@ -1,0 +1,203 @@
+/* Cooldown Reader — Dark theme (main window)
+ * Use this file as the single source for colors and component styles.
+ * To add another theme, duplicate and replace the color values below.
+ */
+
+/* ========== Theme variables (comments only; QSS has no variables) ==========
+ * SectionBg:       #252535
+ * SectionBgDark:   #1e1e2e
+ * SectionBorder:   #3a3a4a
+ * WindowBg:        #2a2a3a
+ * StatusBarBg:     #1e1e2e
+ * StatusBarBorder: #333
+ * KeyCyan:         #66eeff
+ * KeyGreen:        #88ff88
+ * KeyYellow:       #eecc55
+ * TextMuted:       #555, #666, #888, #999
+ * TextBody:        #ccc
+ * ButtonDefault:   #333345 / #555 / #ccc
+ * ButtonPrimary:   #2d5a2d / #3a7a3a / #88ff88
+ * ButtonDanger:    #5a2d2d / #7a3a3a
+ * SlotReady:       #2d5a2d / #3a7a3a
+ * SlotCooldown:    #5a2d2d / #7a3a3a
+ * PriorityReady:   #2d5a2d / #3a7a3a / #88ff88
+ * PriorityCooldown:#5a2d2d / #7a3a3a / #ff8888
+ */
+
+/* ----- Main window central widget ----- */
+QWidget#centralWidget {
+    background: #2a2a3a;
+}
+
+/* ----- Enable bar ----- */
+QPushButton#enableToggle {
+    font-size: 12px;
+    font-weight: bold;
+    padding: 6px 10px;
+    border-radius: 4px;
+    min-height: 32px;
+}
+QPushButton#enableToggle[enabled="true"] {
+    background: #2d5a2d;
+    border: 1px solid #3a7a3a;
+    color: #88ff88;
+}
+QPushButton#enableToggle[enabled="false"] {
+    background: #333345;
+    border: 1px solid #555;
+    color: #999;
+}
+
+QLabel#bindDisplay {
+    background: #252535;
+    border: 1px solid #3a3a4a;
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-family: monospace;
+    font-size: 11px;
+    color: #888;
+}
+
+/* ----- Section frames (Live Preview, Last Action, Next Intention) ----- */
+QFrame#sectionFrame,
+QFrame#sectionFrameDark {
+    border-radius: 4px;
+    padding: 8px;
+}
+QFrame#sectionFrame {
+    background: #252535;
+    border: 1px solid #3a3a4a;
+}
+QFrame#sectionFrameDark {
+    background: #1e1e2e;
+    border: 1px solid #3a3a4a;
+}
+
+/* ----- Section titles ----- */
+QLabel#sectionTitle {
+    font-family: monospace;
+    font-size: 10px;
+    color: #666;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+}
+
+/* ----- Preview area ----- */
+QLabel#previewLabel {
+    background: #111;
+    border-radius: 3px;
+    color: #666;
+    font-size: 11px;
+    min-height: 42px;
+}
+
+/* ----- Action entry row (Last Action / Next Intention rows) ----- */
+QWidget#actionEntryRow {
+    background: #252535;
+    border-radius: 3px;
+    padding: 4px 6px;
+}
+QLabel#actionKey {
+    font-family: monospace;
+    font-size: 14px;
+    font-weight: bold;
+    min-width: 24px;
+}
+QLabel#actionName {
+    font-size: 11px;
+    color: #ccc;
+}
+QLabel#actionMeta {
+    font-size: 9px;
+    color: #666;
+    font-family: monospace;
+}
+QLabel#actionTime {
+    font-size: 9px;
+    color: #555;
+    font-family: monospace;
+}
+
+/* ----- Slot state buttons (base; state set in code) ----- */
+QPushButton#slotButton {
+    font-family: monospace;
+    font-size: 10px;
+    font-weight: bold;
+    border: 1px solid #444;
+    padding: 4px;
+    min-width: 28px;
+    min-height: 28px;
+}
+
+/* ----- Bottom bar buttons ----- */
+QPushButton#btnStartCapture,
+QPushButton#btnSettings {
+    background: #333345;
+    border: 1px solid #555;
+    color: #ccc;
+    padding: 8px 12px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+QPushButton#btnStartCapture:hover,
+QPushButton#btnSettings:hover {
+    background: #3d3d50;
+}
+
+/* ----- Status bar ----- */
+QStatusBar {
+    background: #1e1e2e;
+    border-top: 1px solid #333;
+    padding: 4px 12px;
+    font-size: 10px;
+    font-family: monospace;
+    color: #555;
+}
+
+/* ----- Priority panel (in priority_panel.py, applied when theme loaded) ----- */
+QFrame#priorityPanel {
+    background: #1e1e2e;
+    border: 1px solid #3a3a4a;
+    border-radius: 4px;
+    padding: 8px;
+}
+QFrame#priorityItem {
+    padding: 6px 7px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+}
+QFrame#priorityItem[state="ready"] {
+    background: #2d5a2d;
+    border-color: #3a7a3a;
+}
+QFrame#priorityItem[state="cooldown"] {
+    background: #5a2d2d;
+    border-color: #7a3a3a;
+}
+QLabel#priorityHandle {
+    color: #444;
+    font-size: 11px;
+}
+QLabel#priorityRank {
+    font-family: monospace;
+    font-size: 9px;
+    color: #555;
+    min-width: 12px;
+}
+QLabel#priorityKey {
+    font-family: monospace;
+    font-size: 10px;
+    font-weight: bold;
+    color: #aaa;
+    min-width: 18px;
+}
+QLabel#priorityName {
+    font-size: 11px;
+    font-weight: 500;
+}
+QFrame#priorityItem[state="ready"] QLabel#priorityName { color: #88ff88; }
+QFrame#priorityItem[state="cooldown"] QLabel#priorityName { color: #ff8888; }
+QLabel#priorityRemove {
+    color: #555;
+    font-size: 12px;
+}

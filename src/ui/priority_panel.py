@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QMimeData, QPoint, QTimer, pyqtSignal
-from PyQt6.QtGui import QDrag, QFont
+from PyQt6.QtGui import QDrag, QFont, QFontMetrics
 from PyQt6.QtWidgets import (
     QFrame,
     QGroupBox,
@@ -103,45 +103,43 @@ class PriorityItemWidget(QFrame):
         self._cooldown_remaining: Optional[float] = None
         self._drag_start: Optional[QPoint] = None
         self.setAcceptDrops(False)
+        self.setObjectName("priorityItem")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setContentsMargins(6, 5, 6, 5)
         layout.setSpacing(6)
-        handle_key = QWidget()
-        handle_key_layout = QHBoxLayout(handle_key)
-        handle_key_layout.setContentsMargins(0, 0, 0, 0)
-        handle_key_layout.setSpacing(2)
-        self._handle_label = QLabel("\u28FF")
-        self._handle_label.setStyleSheet("color: #666;")
-        handle_key_layout.addWidget(self._handle_label)
-        self._key_label = QLabel("[?]")
-        self._key_label.setStyleSheet("font-size: 8px;")
-        handle_key_layout.addWidget(self._key_label)
-        layout.addWidget(handle_key)
-        layout.addStretch(1)
-        name_container = QWidget()
-        name_container.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        name_container_layout = QHBoxLayout(name_container)
-        name_container_layout.setContentsMargins(0, 0, 0, 0)
-        name_container_layout.setSpacing(0)
-        name_container_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._handle_label = QLabel("\u28FF")  # drag handle
+        self._handle_label.setObjectName("priorityHandle")
+        layout.addWidget(self._handle_label)
+        self._rank_label = QLabel(str(rank))
+        self._rank_label.setObjectName("priorityRank")
+        self._rank_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._rank_label)
+        self._key_label = QLabel(f"[{keybind}]")
+        self._key_label.setObjectName("priorityKey")
+        layout.addWidget(self._key_label)
         self._name_label = QLabel(self._display_name)
+        self._name_label.setObjectName("priorityName")
         self._name_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._name_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        self._name_label.setStyleSheet("font-size: 12px; font-weight: bold;")
-        name_container_layout.addWidget(self._name_label, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(name_container, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch(1)
+        self._name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._name_label.setMinimumWidth(0)
+        self._name_label.setMinimumHeight(20)
+        self._name_label.setWordWrap(False)
+        layout.addWidget(self._name_label, 1)
         self._countdown_label = QLabel("—")
-        self._countdown_label.setMinimumWidth(36)
+        self._countdown_label.setMinimumWidth(32)
         self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         font = QFont("Consolas")
         if not font.exactMatch():
             font = QFont("Courier New")
-        font.setPointSize(10)
+        font.setPointSize(9)
         self._countdown_label.setFont(font)
-        self._countdown_label.setStyleSheet("font-size: 11px;")
         layout.addWidget(self._countdown_label)
-        self.setFixedHeight(36)
+        self._remove_btn = QLabel("−")
+        self._remove_btn.setObjectName("priorityRemove")
+        self._remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self._remove_btn)
+        self.setMinimumHeight(40)
+        self.setFixedHeight(40)
         self._update_style()
 
     @property
@@ -150,6 +148,7 @@ class PriorityItemWidget(QFrame):
 
     def set_rank(self, rank: int) -> None:
         self._rank = rank
+        self._rank_label.setText(str(rank))
 
     def set_keybind(self, keybind: str) -> None:
         self._keybind = keybind
@@ -157,10 +156,21 @@ class PriorityItemWidget(QFrame):
 
     def set_display_name(self, name: str) -> None:
         self._display_name = name or "Unidentified"
-        self._name_label.setText(self._display_name)
-        self._name_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._name_label.setMinimumWidth(0)
-        self._name_label.adjustSize()
+        self._update_name_elided()
+
+    def _update_name_elided(self) -> None:
+        """Set name label to full or elided text to avoid horizontal clipping."""
+        w = self._name_label.width()
+        if w <= 0:
+            self._name_label.setText(self._display_name)
+            return
+        metrics = QFontMetrics(self._name_label.font())
+        elided = metrics.elidedText(self._display_name, Qt.TextElideMode.ElideRight, w)
+        self._name_label.setText(elided)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_name_elided()
 
     def set_state(self, state: str, cooldown_remaining: Optional[float] = None) -> None:
         self._state = state
@@ -169,25 +179,16 @@ class PriorityItemWidget(QFrame):
         self._update_style()
 
     def _update_style(self) -> None:
-        bg_ready = "#2d5a2d"
-        bg_not_ready = "#5a2d2d"
-        text_ready = "#b8e0b8"
-        text_not_ready = "#e0b8b8"
-        if self._state == "ready":
-            bg = bg_ready
-            text_color = text_ready
-        else:
-            bg = bg_not_ready
-            text_color = text_not_ready
-        self.setStyleSheet(
-            f"PriorityItemWidget {{ background: {bg}; border: 1px solid #444; }}"
-        )
-        self._handle_label.setStyleSheet("color: #888;")
-        self._key_label.setStyleSheet(f"color: {text_color}; font-size: 8px;")
-        self._name_label.setStyleSheet(
-            f"color: {text_color}; font-size: 12px; font-weight: bold;"
-        )
-        self._countdown_label.setStyleSheet(f"color: {text_color}; font-size: 11px;")
+        state = "ready" if self._state == "ready" else "cooldown"
+        self.setProperty("state", state)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        text_ready = "#88ff88"
+        text_not_ready = "#ff8888"
+        text_color = text_ready if self._state == "ready" else text_not_ready
+        self._key_label.setStyleSheet(f"color: {text_color};")
+        self._name_label.setStyleSheet(f"color: {text_color};")
+        self._countdown_label.setStyleSheet(f"color: {text_color};")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -343,7 +344,7 @@ class PriorityListWidget(QWidget):
 
 
 class PriorityPanel(QWidget):
-    """Right-side panel: last action, next intention, priority list."""
+    """Right-side panel: priority list only (Last Action and Next Intention are in main window left column)."""
 
     gcd_updated = pyqtSignal(float)  # Estimated GCD in seconds
 
@@ -352,53 +353,51 @@ class PriorityPanel(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setFixedWidth(200)
-        self.setStyleSheet("PriorityPanel { background-color: #252525; }")
+        self.setStyleSheet("PriorityPanel { background: transparent; }")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        last_action_group = QGroupBox("Last Action")
-        last_action_layout = QVBoxLayout(last_action_group)
-        self._last_action_label = QLabel("—")
-        self._last_action_label.setStyleSheet("color: #888; font-size: 11px;")
-        last_action_layout.addWidget(self._last_action_label)
-        layout.addWidget(last_action_group)
         self._last_action_keybind: Optional[str] = None
         self._last_action_display_name: str = "Unidentified"
         self._last_action_timestamp: float = 0.0
         self._last_action_timer = QTimer(self)
         self._last_action_timer.setInterval(100)
         self._last_action_timer.timeout.connect(self._on_last_action_timer)
-
         self._send_timestamps: list[float] = []
 
-        next_intention_group = QGroupBox("Next Intention")
-        next_intention_layout = QVBoxLayout(next_intention_group)
-        self._next_intention_label = QLabel("—")
-        self._next_intention_label.setStyleSheet("color: #888; font-size: 11px;")
-        next_intention_layout.addWidget(self._next_intention_label)
-        layout.addWidget(next_intention_group)
-
-        priority_group = QGroupBox("Priority")
-        priority_group_layout = QVBoxLayout(priority_group)
+        priority_frame = QFrame()
+        priority_frame.setObjectName("priorityPanel")
+        priority_inner = QVBoxLayout(priority_frame)
+        priority_inner.setContentsMargins(8, 8, 8, 8)
+        title = QLabel("PRIORITY ↕")
+        title.setStyleSheet(
+            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
+        )
+        priority_inner.addWidget(title)
         self._priority_list = PriorityListWidget(self)
-        priority_group_layout.addWidget(self._priority_list, 1)
-        layout.addWidget(priority_group, 1)
+        priority_inner.addWidget(self._priority_list, 1)
+        layout.addWidget(priority_frame, 1)
 
     @property
     def last_action_label(self) -> QLabel:
-        return self._last_action_label
+        """Deprecated: Last Action is now in main window. Returns a dummy label for backwards compat."""
+        if not hasattr(self, "_dummy_last_action_label"):
+            self._dummy_last_action_label = QLabel("—")
+        return self._dummy_last_action_label
 
     @property
     def next_intention_label(self) -> QLabel:
-        return self._next_intention_label
+        """Deprecated: Next Intention is now in main window. Returns a dummy label for backwards compat."""
+        if not hasattr(self, "_dummy_next_intention_label"):
+            self._dummy_next_intention_label = QLabel("—")
+        return self._dummy_next_intention_label
 
     @property
     def priority_list(self) -> PriorityListWidget:
         return self._priority_list
 
     def update_last_action_sent(self, keybind: str, timestamp: float, display_name: str = "Unidentified") -> None:
-        """Show [keybind] display_name and start live 'Xs ago' timer."""
+        """Legacy: update label and record for GCD. Prefer record_send_timestamp when main window has its own Last Action display."""
         self._last_action_keybind = keybind
         self._last_action_display_name = display_name or "Unidentified"
         self._last_action_timestamp = timestamp
@@ -406,7 +405,10 @@ class PriorityPanel(QWidget):
         if not self._last_action_timer.isActive():
             self._last_action_timer.start()
         self._on_last_action_timer()
+        self.record_send_timestamp(timestamp)
 
+    def record_send_timestamp(self, timestamp: float) -> None:
+        """Record a key-send timestamp for GCD estimation. Call from main window when Last Action is displayed there."""
         self._send_timestamps.append(timestamp)
         if len(self._send_timestamps) > self.GCD_WINDOW_SIZE:
             self._send_timestamps = self._send_timestamps[-self.GCD_WINDOW_SIZE:]
