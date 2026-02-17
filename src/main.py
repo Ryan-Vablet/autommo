@@ -13,6 +13,7 @@ from pathlib import Path
 from PyQt6.QtCore import QRect, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
+from src.automation.global_hotkey import GlobalToggleListener
 from src.capture import ScreenCapture
 from src.analysis import SlotAnalyzer
 from src.models import AppConfig, BoundingBox
@@ -198,6 +199,15 @@ def main() -> None:
 
     window._btn_start.clicked.connect(toggle_capture)
 
+    # Global hotkey to toggle automation (works when app does not have focus)
+    def on_global_toggle():
+        cb = window._priority_panel.automation_check
+        cb.setChecked(not cb.isChecked())
+
+    hotkey_listener = GlobalToggleListener(get_bind=lambda: config.automation_toggle_bind)
+    hotkey_listener.triggered.connect(on_global_toggle)
+    hotkey_listener.start()
+
     # Calibrate baselines: grab one frame on main thread with short-lived mss
     def revert_calibrate_button():
         window._btn_calibrate.setText("Calibrate Baselines")
@@ -255,6 +265,7 @@ def main() -> None:
     exit_code = app.exec()
 
     # Cleanup
+    hotkey_listener.stop()
     if is_running[0]:
         worker.stop()
     sys.exit(exit_code)

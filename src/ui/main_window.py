@@ -10,6 +10,7 @@ Controls:
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from pathlib import Path
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
         # Slots whose baseline was set by "Calibrate This Slot" (show bold; persisted in config)
         self._slots_recalibrated: set[int] = set(getattr(config, "overwritten_baseline_slots", []))
         self._before_save_callback: Optional[Callable[[], None]] = None
+        self._last_saved_config: Optional[dict] = None
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(800, 400)
 
@@ -115,8 +117,12 @@ class MainWindow(QMainWindow):
         monitor_group = QGroupBox("Monitor")
         monitor_layout = QHBoxLayout(monitor_group)
         self._monitor_combo = QComboBox()
+        self._monitor_combo.setMaximumWidth(180)
         monitor_layout.addWidget(QLabel("Monitor:"))
         monitor_layout.addWidget(self._monitor_combo)
+        monitor_layout.addStretch(1)
+        self._check_overlay = QCheckBox("Show Region Overlay")
+        monitor_layout.addWidget(self._check_overlay)
         layout.addWidget(monitor_group)
 
         # --- Capture Region ---
@@ -125,49 +131,46 @@ class MainWindow(QMainWindow):
 
         # Row 1: Region position and size (pixels relative to monitor)
         region_row = QHBoxLayout()
+        region_row.setSpacing(4)
         self._spin_top = QSpinBox()
         self._spin_left = QSpinBox()
         self._spin_width = QSpinBox()
         self._spin_height = QSpinBox()
-        for spin, label, max_val in [
+        for i, (spin, label, max_val) in enumerate([
             (self._spin_top, "Top:", 4000),
             (self._spin_left, "Left:", 8000),
             (self._spin_width, "Width:", 2000),
             (self._spin_height, "Height:", 500),
-        ]:
+        ]):
             spin.setRange(0, max_val)
             spin.setSingleStep(1)
             region_row.addWidget(QLabel(label))
             region_row.addWidget(spin)
+            if i < 3:
+                region_row.addStretch(1)
         capture_layout.addLayout(region_row)
 
         # Row 2: Slot layout (how the region is divided)
         slots_row = QHBoxLayout()
+        slots_row.setSpacing(4)
         slots_row.addWidget(QLabel("Slots:"))
         self._spin_slots = QSpinBox()
         self._spin_slots.setRange(1, 24)
         slots_row.addWidget(self._spin_slots)
+        slots_row.addStretch(1)
         slots_row.addWidget(QLabel("Gap:"))
         self._spin_gap = QSpinBox()
         self._spin_gap.setRange(0, 20)
         self._spin_gap.setSuffix(" px")
         slots_row.addWidget(self._spin_gap)
+        slots_row.addStretch(1)
         slots_row.addWidget(QLabel("Padding:"))
         self._spin_padding = QSpinBox()
         self._spin_padding.setRange(0, 20)
         self._spin_padding.setSuffix(" px")
         slots_row.addWidget(self._spin_padding)
-        slots_row.addStretch()
+        slots_row.addStretch(1)
         capture_layout.addLayout(slots_row)
-
-        # Row 3: Overlay
-        overlay_row = QHBoxLayout()
-        self._check_overlay = QCheckBox("Show overlay")
-        overlay_row.addWidget(self._check_overlay)
-        overlay_row.addStretch()
-        capture_layout.addLayout(overlay_row)
-
-        layout.addWidget(capture_group)
 
         # --- Detection settings ---
         detect_group = QGroupBox("Detection")
@@ -175,7 +178,7 @@ class MainWindow(QMainWindow):
 
         # Darken threshold: how much a pixel must drop to count as "darkened"
         darken_row = QHBoxLayout()
-        darken_row.addWidget(QLabel("Darken threshold:"))
+        darken_row.addWidget(QLabel("Darken:"))
         self._spin_brightness_drop = QSpinBox()
         self._spin_brightness_drop.setRange(0, 255)
         darken_row.addWidget(self._spin_brightness_drop)
@@ -194,7 +197,7 @@ class MainWindow(QMainWindow):
 
         # Trigger fraction: fraction of pixels darkened to mark slot as ON_COOLDOWN
         trigger_row = QHBoxLayout()
-        trigger_row.addWidget(QLabel("Trigger fraction:"))
+        trigger_row.addWidget(QLabel("Trigger:"))
         self._slider_pixel_fraction = QSlider(Qt.Orientation.Horizontal)
         self._slider_pixel_fraction.setRange(10, 90)  # 0.10 to 0.90
         self._slider_pixel_fraction.setSingleStep(5)
@@ -218,13 +221,17 @@ class MainWindow(QMainWindow):
         trigger_row.addStretch()
         detect_layout.addLayout(trigger_row)
 
-        layout.addWidget(detect_group)
+        # Capture Region and Detection side by side
+        capture_detect_row = QHBoxLayout()
+        capture_detect_row.addWidget(capture_group, 1)
+        capture_detect_row.addWidget(detect_group, 1)
+        layout.addLayout(capture_detect_row)
 
         # --- Controls ---
         controls_layout = QHBoxLayout()
         self._btn_start = QPushButton("Start Capture")
         self._btn_calibrate = QPushButton("Calibrate Baselines")
-        self._btn_save_config = QPushButton("Save Config")
+        self._btn_save_config = QPushButton("Save Settings")
         controls_layout.addWidget(self._btn_start)
         controls_layout.addWidget(self._btn_calibrate)
         controls_layout.addWidget(self._btn_save_config)
@@ -269,6 +276,7 @@ class MainWindow(QMainWindow):
         self._btn_save_config.clicked.connect(self._save_config)
         self._priority_panel.automation_check.toggled.connect(self._on_automation_toggled)
         self._priority_panel.priority_list.order_changed.connect(self._on_priority_order_changed)
+        self._priority_panel.bind_captured.connect(self._on_automation_bind_captured)
 
     def _sync_ui_from_config(self) -> None:
         """Set UI controls to match current config."""
@@ -304,7 +312,8 @@ class MainWindow(QMainWindow):
             self._slider_pixel_fraction.blockSignals(False)
         self._priority_panel.automation_check.blockSignals(True)
         try:
-            self._priority_panel.automation_check.setChecked(bool(self._config.automation_enabled))
+            self._config.automation_enabled = False
+            self._priority_panel.automation_check.setChecked(False)
         finally:
             self._priority_panel.automation_check.blockSignals(False)
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
@@ -313,6 +322,55 @@ class MainWindow(QMainWindow):
             self._priority_panel.priority_list.set_order(getattr(self._config, "priority_order", []))
         finally:
             self._priority_panel.priority_list.blockSignals(False)
+        self._priority_panel.set_toggle_bind(getattr(self._config, "automation_toggle_bind", ""))
+        self._prepopulate_slot_buttons()
+        if CONFIG_PATH.exists():
+            self._last_saved_config = copy.deepcopy(self._config.to_dict())
+        self._update_save_button_state()
+
+    def _update_save_button_state(self) -> None:
+        """Enable button when there are unsaved changes; disable when in sync. Label is always 'Save Settings'.
+        automation_enabled is excluded from the comparison (it resets on launch and toggling it should not affect save state).
+        """
+        self._btn_save_config.setText("Save Settings")
+        if self._last_saved_config is None:
+            self._btn_save_config.setEnabled(True)
+            return
+        try:
+            current = self._config.to_dict()
+            current_compare = {k: v for k, v in current.items() if k != "automation_enabled"}
+            last_compare = {k: v for k, v in self._last_saved_config.items() if k != "automation_enabled"}
+            if current_compare == last_compare:
+                self._btn_save_config.setEnabled(False)
+            else:
+                self._btn_save_config.setEnabled(True)
+        except Exception:
+            self._btn_save_config.setEnabled(True)
+
+    def _prepopulate_slot_buttons(self) -> None:
+        """Build slot buttons from config (slot_count + keybinds) in a not-ready state. Used on load before capture runs."""
+        n = self._config.slot_count
+        while len(self._config.keybinds) < n:
+            self._config.keybinds.append("")
+        if len(self._slot_buttons) != n:
+            for b in self._slot_buttons:
+                b.deleteLater()
+            self._slot_buttons.clear()
+            for i in range(n):
+                btn = SlotButton(i, self._state_layout.parentWidget())
+                btn.setMinimumWidth(52)
+                btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+                btn.setStyleSheet("border: 1px solid #444; padding: 4px;")
+                btn.context_menu_requested.connect(self._show_slot_menu)
+                self._state_layout.addWidget(btn)
+                self._slot_buttons.append(btn)
+        for i, btn in enumerate(self._slot_buttons):
+            keybind = self._config.keybinds[i] if i < len(self._config.keybinds) else "?"
+            self._apply_slot_button_style(btn, "unknown", keybind or "?", None, slot_index=i)
+        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
+        self._priority_panel.priority_list.update_states(
+            [{"index": i, "state": "unknown", "keybind": self._config.keybinds[i] if i < len(self._config.keybinds) else None, "cooldown_remaining": None} for i in range(n)]
+        )
 
     def _on_bbox_changed(self) -> None:
         self._config.bounding_box = BoundingBox(
@@ -322,16 +380,19 @@ class MainWindow(QMainWindow):
             height=self._spin_height.value(),
         )
         self.bounding_box_changed.emit(self._config.bounding_box)
+        self._update_save_button_state()
 
     def _on_detection_changed(self) -> None:
         self._config.brightness_drop_threshold = self._spin_brightness_drop.value()
         self._config.cooldown_pixel_fraction = self._slider_pixel_fraction.value() / 100.0
         self._pixel_fraction_label.setText(f"{self._config.cooldown_pixel_fraction:.2f}")
         self.config_changed.emit(self._config)
+        self._update_save_button_state()
 
     def _on_overlay_toggled(self, checked: bool) -> None:
         self._config.overlay_enabled = checked
         self.overlay_visibility_changed.emit(checked)
+        self._update_save_button_state()
 
     def _on_slot_layout_changed(self) -> None:
         self._config.slot_count = self._spin_slots.value()
@@ -343,20 +404,29 @@ class MainWindow(QMainWindow):
             self._config.slot_gap_pixels,
             self._config.slot_padding,
         )
+        self._prepopulate_slot_buttons()
+        self._update_save_button_state()
 
     def _on_automation_toggled(self, checked: bool) -> None:
         self._config.automation_enabled = checked
         self.config_changed.emit(self._config)
 
+    def _on_automation_bind_captured(self, bind_str: str) -> None:
+        self._config.automation_toggle_bind = bind_str
+        self.config_changed.emit(self._config)
+        self._update_save_button_state()
+
     def _on_priority_order_changed(self, order: list) -> None:
         self._config.priority_order = list(order)
         self.config_changed.emit(self._config)
+        self._update_save_button_state()
 
     def _on_priority_drop_remove(self, slot_index: int) -> None:
         """Called when a priority item is dropped on the left panel (remove from list)."""
         self._priority_panel.priority_list.remove_slot(slot_index)
         self._config.priority_order = self._priority_panel.priority_list.get_order()
         self.config_changed.emit(self._config)
+        self._update_save_button_state()
 
     # Padding (px) around the preview image inside the Live Preview panel
     PREVIEW_PADDING = 12
@@ -478,6 +548,7 @@ class MainWindow(QMainWindow):
                         self._slot_buttons[idx], "unknown", key_str, slot_index=idx
                     )
                 self.config_changed.emit(self._config)
+                self._update_save_button_state()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -555,7 +626,9 @@ class MainWindow(QMainWindow):
             with open(CONFIG_PATH, "w") as f:
                 json.dump(self._config.to_dict(), f, indent=2)
             logger.info(f"Config saved to {CONFIG_PATH}")
+            self._last_saved_config = copy.deepcopy(self._config.to_dict())
             self._btn_save_config.setText("Saved ✓")
+            self._btn_save_config.setEnabled(False)
             QTimer.singleShot(2000, self._revert_save_config_button)
         except Exception as e:
             logger.error(f"Config save failed: {e}")
@@ -564,8 +637,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, self._revert_save_config_button)
 
     def _revert_save_config_button(self) -> None:
-        self._btn_save_config.setText("Save Config")
         self._btn_save_config.setStyleSheet("")
+        self._update_save_button_state()
 
     def populate_monitors(self, monitors: list[dict]) -> None:
         """Fill the monitor dropdown with available monitors."""

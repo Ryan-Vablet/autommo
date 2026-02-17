@@ -99,6 +99,8 @@ class AppConfig:
     # Priority order for automation: list of slot indices (first READY in this order is "next")
     priority_order: list[int] = field(default_factory=list)
     automation_enabled: bool = False
+    # Global hotkey to toggle automation (e.g. "f5", "x1" for mouse side button); empty = not set
+    automation_toggle_bind: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
@@ -125,6 +127,7 @@ class AppConfig:
             overwritten_baseline_slots=data.get("overwritten_baseline_slots", []),
             priority_order=data.get("priority_order", []),
             automation_enabled=data.get("automation_enabled", False),
+            automation_toggle_bind=data.get("automation_toggle_bind", ""),
         )
 
     def to_dict(self) -> dict:
@@ -154,4 +157,5 @@ class AppConfig:
             "overwritten_baseline_slots": self.overwritten_baseline_slots,
             "priority_order": self.priority_order,
             "automation_enabled": self.automation_enabled,
+            "automation_toggle_bind": self.automation_toggle_bind,
         }

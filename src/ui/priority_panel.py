@@ -19,6 +19,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from src.automation.global_hotkey import (
+    CaptureOneKeyThread,
+    format_bind_for_display,
+)
+
 logger = logging.getLogger(__name__)
 
 MIME_SLOT = "application/x-cooldown-slot"
@@ -281,6 +286,8 @@ class PriorityListWidget(QWidget):
 class PriorityPanel(QWidget):
     """Right-side panel: automation toggle, last action, next intention, priority list."""
 
+    bind_captured = pyqtSignal(str)
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFixedWidth(200)
@@ -288,9 +295,22 @@ class PriorityPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        self._check_automation = QCheckBox("Automation ON/OFF")
+        automation_row = QHBoxLayout()
+        self._check_automation = QCheckBox("Automation")
         self._check_automation.setChecked(False)
-        layout.addWidget(self._check_automation)
+        automation_row.addWidget(self._check_automation)
+        automation_row.addStretch()
+        self._toggle_bind_btn = QPushButton("Set")
+        self._toggle_bind_btn.setMaximumWidth(72)
+        self._toggle_bind_btn.setMinimumHeight(24)
+        self._toggle_bind_btn.clicked.connect(self._on_toggle_bind_clicked)
+        automation_row.addWidget(self._toggle_bind_btn)
+        layout.addLayout(automation_row)
+
+        self._toggle_bind_str = ""
+        self._capture_thread: Optional[CaptureOneKeyThread] = None
+        self._check_automation.toggled.connect(self._update_toggle_button_style)
+        self._update_toggle_button_style()
 
         last_action_group = QGroupBox("Last Action")
         last_action_layout = QVBoxLayout(last_action_group)
@@ -311,6 +331,53 @@ class PriorityPanel(QWidget):
         self._priority_list = PriorityListWidget(self)
         priority_group_layout.addWidget(self._priority_list, 1)
         layout.addWidget(priority_group, 1)
+
+    def set_toggle_bind(self, bind_str: str) -> None:
+        """Set the displayed toggle key (e.g. after loading config or after capture)."""
+        self._toggle_bind_str = (bind_str or "").strip()
+        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
+        self._update_toggle_button_style()
+
+    def _update_toggle_button_style(self) -> None:
+        on = self._check_automation.isChecked()
+        if on:
+            self._toggle_bind_btn.setStyleSheet(
+                "background-color: #2d5a2d; color: #b8e0b8; border: 1px solid #444; font-size: 11px;"
+            )
+        else:
+            self._toggle_bind_btn.setStyleSheet(
+                "background-color: #3a3a3a; color: #aaa; border: 1px solid #555; font-size: 11px;"
+            )
+
+    def _on_toggle_bind_clicked(self) -> None:
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            return
+        self._toggle_bind_btn.setText("...")
+        self._toggle_bind_btn.setEnabled(False)
+        self._capture_thread = CaptureOneKeyThread(self)
+        self._capture_thread.captured.connect(self._on_bind_captured)
+        self._capture_thread.cancelled.connect(self._on_bind_capture_cancelled)
+        self._capture_thread.finished.connect(self._on_capture_thread_finished)
+        self._capture_thread.start()
+
+    def _on_bind_captured(self, bind_str: str) -> None:
+        self._toggle_bind_str = (bind_str or "").strip()
+        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
+        self._toggle_bind_btn.setEnabled(True)
+        self._update_toggle_button_style()
+        self.bind_captured.emit(self._toggle_bind_str)
+
+    def _on_bind_capture_cancelled(self) -> None:
+        self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
+        self._toggle_bind_btn.setEnabled(True)
+        self._update_toggle_button_style()
+
+    def _on_capture_thread_finished(self) -> None:
+        self._capture_thread = None
+        if self._toggle_bind_btn.text() == "...":
+            self._toggle_bind_btn.setText(format_bind_for_display(self._toggle_bind_str))
+            self._toggle_bind_btn.setEnabled(True)
+            self._update_toggle_button_style()
 
     @property
     def automation_check(self) -> QCheckBox:
