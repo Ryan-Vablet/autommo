@@ -244,6 +244,20 @@ class SettingsDialog(QDialog):
         change_row.addWidget(self._change_pixel_fraction_label)
         change_row.addWidget(change_help)
         fl.addRow(_row_label("Change:"), change_row)
+        self._edit_cooldown_change_ignore_by_slot = QLineEdit()
+        self._edit_cooldown_change_ignore_by_slot.setPlaceholderText("e.g. 5")
+        self._edit_cooldown_change_ignore_by_slot.setToolTip(
+            "Optional slot indexes where change-based cooldown detection is ignored."
+        )
+        change_ignore_help = QLabel("(?)")
+        change_ignore_help.setToolTip(
+            "Example: 5 means slot 5 uses dark-cooldown detection only."
+        )
+        change_ignore_help.setStyleSheet("color: #666; font-size: 11px;")
+        change_ignore_row = QHBoxLayout()
+        change_ignore_row.addWidget(self._edit_cooldown_change_ignore_by_slot)
+        change_ignore_row.addWidget(change_ignore_help)
+        fl.addRow(_row_label("Change ignore:"), change_ignore_row)
         self._check_glow_enabled = QCheckBox("Enable glow ready override")
         self._check_glow_enabled.setToolTip(
             "If enabled, confirmed icon glow can mark a slot ready even when generic change-delta says not-ready."
@@ -284,6 +298,48 @@ class SettingsDialog(QDialog):
         glow_row.addWidget(self._spin_glow_confirm_frames)
         glow_row.addStretch()
         fl.addRow(_row_label("Glow:"), glow_row)
+        self._edit_glow_value_delta_by_slot = QLineEdit()
+        self._edit_glow_value_delta_by_slot.setPlaceholderText("e.g. 4:55, 6:45")
+        self._edit_glow_value_delta_by_slot.setToolTip(
+            "Optional per-slot V+ overrides as slot:delta pairs (0-based slot index), comma-separated."
+        )
+        glow_slot_help = QLabel("(?)")
+        glow_slot_help.setToolTip(
+            "Example: 4:55,6:45 means slot 4 uses V+=55 and slot 6 uses V+=45."
+        )
+        glow_slot_help.setStyleSheet("color: #666; font-size: 11px;")
+        glow_slot_row = QHBoxLayout()
+        glow_slot_row.addWidget(self._edit_glow_value_delta_by_slot)
+        glow_slot_row.addWidget(glow_slot_help)
+        fl.addRow(_row_label("Glow by slot:"), glow_slot_row)
+        self._edit_glow_ring_fraction_by_slot = QLineEdit()
+        self._edit_glow_ring_fraction_by_slot.setPlaceholderText("e.g. 5:0.08")
+        self._edit_glow_ring_fraction_by_slot.setToolTip(
+            "Optional per-slot yellow fraction overrides as slot:fraction pairs (0-based), comma-separated."
+        )
+        glow_frac_slot_help = QLabel("(?)")
+        glow_frac_slot_help.setToolTip(
+            "Example: 5:0.08 lowers yellow fraction threshold for slot 5 only."
+        )
+        glow_frac_slot_help.setStyleSheet("color: #666; font-size: 11px;")
+        glow_frac_slot_row = QHBoxLayout()
+        glow_frac_slot_row.addWidget(self._edit_glow_ring_fraction_by_slot)
+        glow_frac_slot_row.addWidget(glow_frac_slot_help)
+        fl.addRow(_row_label("Y frac by slot:"), glow_frac_slot_row)
+        self._edit_glow_override_cooldown_by_slot = QLineEdit()
+        self._edit_glow_override_cooldown_by_slot.setPlaceholderText("e.g. 5")
+        self._edit_glow_override_cooldown_by_slot.setToolTip(
+            "Optional slot indexes where any confirmed glow (not just red) can override cooldown."
+        )
+        glow_override_help = QLabel("(?)")
+        glow_override_help.setToolTip(
+            "Example: 5,7 allows yellow/white glow to mark those slots ready while on cooldown."
+        )
+        glow_override_help.setStyleSheet("color: #666; font-size: 11px;")
+        glow_override_row = QHBoxLayout()
+        glow_override_row.addWidget(self._edit_glow_override_cooldown_by_slot)
+        glow_override_row.addWidget(glow_override_help)
+        fl.addRow(_row_label("Glow->ready:"), glow_override_row)
         self._slider_glow_ring_fraction = QSlider(Qt.Orientation.Horizontal)
         self._slider_glow_ring_fraction.setRange(5, 60)
         self._slider_glow_ring_fraction.setSingleStep(1)
@@ -558,11 +614,15 @@ class SettingsDialog(QDialog):
         self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._slider_change_pixel_fraction.valueChanged.connect(self._on_detection_changed)
+        self._edit_cooldown_change_ignore_by_slot.editingFinished.connect(self._on_detection_changed)
         self._check_glow_enabled.toggled.connect(self._on_detection_changed)
         self._spin_glow_ring_thickness.valueChanged.connect(self._on_detection_changed)
         self._spin_glow_value_delta.valueChanged.connect(self._on_detection_changed)
         self._spin_glow_saturation_min.valueChanged.connect(self._on_detection_changed)
         self._spin_glow_confirm_frames.valueChanged.connect(self._on_detection_changed)
+        self._edit_glow_value_delta_by_slot.editingFinished.connect(self._on_detection_changed)
+        self._edit_glow_ring_fraction_by_slot.editingFinished.connect(self._on_detection_changed)
+        self._edit_glow_override_cooldown_by_slot.editingFinished.connect(self._on_detection_changed)
         self._slider_glow_ring_fraction.valueChanged.connect(self._on_detection_changed)
         self._slider_glow_red_ring_fraction.valueChanged.connect(self._on_detection_changed)
         self._spin_glow_yellow_hue_min.valueChanged.connect(self._on_detection_changed)
@@ -642,11 +702,15 @@ class SettingsDialog(QDialog):
         self._spin_brightness_drop.blockSignals(True)
         self._slider_pixel_fraction.blockSignals(True)
         self._slider_change_pixel_fraction.blockSignals(True)
+        self._edit_cooldown_change_ignore_by_slot.blockSignals(True)
         self._check_glow_enabled.blockSignals(True)
         self._spin_glow_ring_thickness.blockSignals(True)
         self._spin_glow_value_delta.blockSignals(True)
         self._spin_glow_saturation_min.blockSignals(True)
         self._spin_glow_confirm_frames.blockSignals(True)
+        self._edit_glow_value_delta_by_slot.blockSignals(True)
+        self._edit_glow_ring_fraction_by_slot.blockSignals(True)
+        self._edit_glow_override_cooldown_by_slot.blockSignals(True)
         self._slider_glow_ring_fraction.blockSignals(True)
         self._slider_glow_red_ring_fraction.blockSignals(True)
         self._spin_glow_yellow_hue_min.blockSignals(True)
@@ -662,11 +726,31 @@ class SettingsDialog(QDialog):
         self._change_pixel_fraction_label.setText(
             f"{getattr(self._config, 'cooldown_change_pixel_fraction', self._config.cooldown_pixel_fraction):.2f}"
         )
+        self._edit_cooldown_change_ignore_by_slot.setText(
+            self._format_slot_index_list(
+                getattr(self._config, "cooldown_change_ignore_by_slot", []) or []
+            )
+        )
         self._check_glow_enabled.setChecked(bool(getattr(self._config, "glow_enabled", True)))
         self._spin_glow_ring_thickness.setValue(int(getattr(self._config, "glow_ring_thickness_px", 4)))
         self._spin_glow_value_delta.setValue(int(getattr(self._config, "glow_value_delta", 35)))
         self._spin_glow_saturation_min.setValue(int(getattr(self._config, "glow_saturation_min", 80)))
         self._spin_glow_confirm_frames.setValue(int(getattr(self._config, "glow_confirm_frames", 2)))
+        self._edit_glow_value_delta_by_slot.setText(
+            self._format_glow_value_delta_by_slot(
+                getattr(self._config, "glow_value_delta_by_slot", {}) or {}
+            )
+        )
+        self._edit_glow_ring_fraction_by_slot.setText(
+            self._format_glow_ring_fraction_by_slot(
+                getattr(self._config, "glow_ring_fraction_by_slot", {}) or {}
+            )
+        )
+        self._edit_glow_override_cooldown_by_slot.setText(
+            self._format_slot_index_list(
+                getattr(self._config, "glow_override_cooldown_by_slot", []) or []
+            )
+        )
         self._slider_glow_ring_fraction.setValue(
             int(round(getattr(self._config, "glow_ring_fraction", 0.18) * 100))
         )
@@ -732,11 +816,15 @@ class SettingsDialog(QDialog):
         self._spin_brightness_drop.blockSignals(False)
         self._slider_pixel_fraction.blockSignals(False)
         self._slider_change_pixel_fraction.blockSignals(False)
+        self._edit_cooldown_change_ignore_by_slot.blockSignals(False)
         self._check_glow_enabled.blockSignals(False)
         self._spin_glow_ring_thickness.blockSignals(False)
         self._spin_glow_value_delta.blockSignals(False)
         self._spin_glow_saturation_min.blockSignals(False)
         self._spin_glow_confirm_frames.blockSignals(False)
+        self._edit_glow_value_delta_by_slot.blockSignals(False)
+        self._edit_glow_ring_fraction_by_slot.blockSignals(False)
+        self._edit_glow_override_cooldown_by_slot.blockSignals(False)
         self._slider_glow_ring_fraction.blockSignals(False)
         self._slider_glow_red_ring_fraction.blockSignals(False)
         self._spin_glow_yellow_hue_min.blockSignals(False)
@@ -1005,19 +1093,132 @@ class SettingsDialog(QDialog):
         )
         self._emit_config()
 
+    @staticmethod
+    def _parse_glow_value_delta_by_slot(raw_text: str) -> dict[int, int]:
+        out: dict[int, int] = {}
+        for token in str(raw_text or "").split(","):
+            part = token.strip()
+            if not part:
+                continue
+            if ":" not in part:
+                continue
+            left, right = part.split(":", 1)
+            try:
+                slot_idx = int(left.strip())
+                delta = int(right.strip())
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            delta = max(0, min(255, delta))
+            out[slot_idx] = delta
+        return out
+
+    @staticmethod
+    def _format_glow_value_delta_by_slot(overrides: dict) -> str:
+        parsed: list[tuple[int, int]] = []
+        for k, v in (overrides or {}).items():
+            try:
+                slot_idx = int(k)
+                delta = int(v)
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            parsed.append((slot_idx, delta))
+        items = [f"{slot_idx}:{delta}" for slot_idx, delta in sorted(parsed, key=lambda t: t[0])]
+        return ", ".join(items)
+
+    @staticmethod
+    def _parse_glow_ring_fraction_by_slot(raw_text: str) -> dict[int, float]:
+        out: dict[int, float] = {}
+        for token in str(raw_text or "").split(","):
+            part = token.strip()
+            if not part or ":" not in part:
+                continue
+            left, right = part.split(":", 1)
+            try:
+                slot_idx = int(left.strip())
+                frac = float(right.strip())
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            frac = max(0.0, min(1.0, frac))
+            out[slot_idx] = frac
+        return out
+
+    @staticmethod
+    def _format_glow_ring_fraction_by_slot(overrides: dict) -> str:
+        parsed: list[tuple[int, float]] = []
+        for k, v in (overrides or {}).items():
+            try:
+                slot_idx = int(k)
+                frac = float(v)
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            parsed.append((slot_idx, frac))
+        items = [f"{slot_idx}:{frac:.2f}" for slot_idx, frac in sorted(parsed, key=lambda t: t[0])]
+        return ", ".join(items)
+
+    @staticmethod
+    def _parse_slot_index_list(raw_text: str) -> list[int]:
+        out: list[int] = []
+        seen: set[int] = set()
+        for token in str(raw_text or "").split(","):
+            part = token.strip()
+            if not part:
+                continue
+            try:
+                slot_idx = int(part)
+            except Exception:
+                continue
+            if slot_idx < 0 or slot_idx in seen:
+                continue
+            seen.add(slot_idx)
+            out.append(slot_idx)
+        return out
+
+    @staticmethod
+    def _format_slot_index_list(values: list[int]) -> str:
+        parsed: set[int] = set()
+        for v in values or []:
+            try:
+                slot_idx = int(v)
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            parsed.add(slot_idx)
+        return ", ".join(str(v) for v in sorted(parsed))
+
     def _on_detection_changed(self) -> None:
         self._config.brightness_drop_threshold = self._spin_brightness_drop.value()
         self._config.cooldown_pixel_fraction = self._slider_pixel_fraction.value() / 100.0
         self._pixel_fraction_label.setText(f"{self._config.cooldown_pixel_fraction:.2f}")
         self._config.cooldown_change_pixel_fraction = self._slider_change_pixel_fraction.value() / 100.0
         self._change_pixel_fraction_label.setText(f"{self._config.cooldown_change_pixel_fraction:.2f}")
+        self._config.cooldown_change_ignore_by_slot = self._parse_slot_index_list(
+            self._edit_cooldown_change_ignore_by_slot.text()
+        )
         self._config.glow_enabled = self._check_glow_enabled.isChecked()
         self._config.glow_ring_thickness_px = self._spin_glow_ring_thickness.value()
         self._config.glow_value_delta = self._spin_glow_value_delta.value()
+        self._config.glow_value_delta_by_slot = self._parse_glow_value_delta_by_slot(
+            self._edit_glow_value_delta_by_slot.text()
+        )
         self._config.glow_saturation_min = self._spin_glow_saturation_min.value()
         self._config.glow_confirm_frames = self._spin_glow_confirm_frames.value()
         self._config.glow_ring_fraction = self._slider_glow_ring_fraction.value() / 100.0
+        self._config.glow_ring_fraction_by_slot = self._parse_glow_ring_fraction_by_slot(
+            self._edit_glow_ring_fraction_by_slot.text()
+        )
         self._config.glow_red_ring_fraction = self._slider_glow_red_ring_fraction.value() / 100.0
+        self._config.glow_override_cooldown_by_slot = self._parse_slot_index_list(
+            self._edit_glow_override_cooldown_by_slot.text()
+        )
         y_min = self._spin_glow_yellow_hue_min.value()
         y_max = self._spin_glow_yellow_hue_max.value()
         if y_min > y_max:

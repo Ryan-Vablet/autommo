@@ -89,6 +89,8 @@ The right panel also shows:
 - **Always on top** — Check to keep the app window above other windows.
 - **Detection** — **Darken**, **Trigger**, **Yellow frac**, and **Red frac** control cooldown/glow detection sensitivity.
 - **Red glow threshold** — Tune **Red frac** if DoT-refresh slots are triggering too early or too late on red-glow windows.
+- **Per-slot glow sensitivity (advanced)** — In `config/default_config.json`, set `detection.glow_value_delta_by_slot` (example: `{"4": 55}`) to lower/raise glow brightness delta for one slot without changing others.
+- **Per-slot glow thresholds (advanced)** — Use `detection.glow_ring_fraction_by_slot` (example: `{"5": 0.08}`) and `detection.glow_override_cooldown_by_slot` (example: `[5]`) for proc-style icons that need lower yellow-fraction threshold and optional non-red glow cooldown override.
 - **Cast detection** — Configure cast band %, confirmation frames, min/max cast duration, cancel grace, and channeling mode.
 - **Cast bar ROI (optional)** — Define a region inside the capture box to detect active cast-bar motion; optionally mark ready slots as `locked` while active.
 - **Save Settings** — Saves the current config (region, slots, keybinds, priority profiles + binds, detection, overlay, delay, window title, etc.) to `config/default_config.json`.

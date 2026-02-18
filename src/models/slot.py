@@ -115,6 +115,8 @@ class AppConfig:
     cooldown_min_duration_ms: int = 2000
     # Extra detector: absolute baseline change fraction (captures bright overlays).
     cooldown_change_pixel_fraction: float = 0.30
+    # Optional slot indexes where cooldown-change detector is ignored (dark detector still applies).
+    cooldown_change_ignore_by_slot: list[int] = field(default_factory=list)
     cast_detection_enabled: bool = True
     cast_candidate_min_fraction: float = 0.05
     cast_candidate_max_fraction: float = 0.22
@@ -132,9 +134,15 @@ class AppConfig:
     glow_enabled: bool = True
     glow_ring_thickness_px: int = 4
     glow_value_delta: int = 35
+    # Optional per-slot override for glow_value_delta: {slot_index: delta}.
+    glow_value_delta_by_slot: dict[int, int] = field(default_factory=dict)
     glow_saturation_min: int = 80
     glow_ring_fraction: float = 0.18
+    # Optional per-slot override for yellow glow ring-fraction threshold: {slot_index: fraction}.
+    glow_ring_fraction_by_slot: dict[int, float] = field(default_factory=dict)
     glow_red_ring_fraction: float = 0.18
+    # Optional per-slot cooldown override trigger for non-red glow (yellow/white proc icons).
+    glow_override_cooldown_by_slot: list[int] = field(default_factory=list)
     glow_confirm_frames: int = 2
     glow_yellow_hue_min: int = 18
     glow_yellow_hue_max: int = 42
@@ -370,6 +378,62 @@ class AppConfig:
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
         bb = data.get("bounding_box", {})
+        raw_glow_delta_by_slot = data.get("detection", {}).get("glow_value_delta_by_slot", {})
+        if not isinstance(raw_glow_delta_by_slot, dict):
+            raw_glow_delta_by_slot = {}
+        raw_glow_ring_frac_by_slot = data.get("detection", {}).get("glow_ring_fraction_by_slot", {})
+        if not isinstance(raw_glow_ring_frac_by_slot, dict):
+            raw_glow_ring_frac_by_slot = {}
+        raw_glow_override_slots = data.get("detection", {}).get("glow_override_cooldown_by_slot", [])
+        if not isinstance(raw_glow_override_slots, list):
+            raw_glow_override_slots = []
+        raw_cooldown_change_ignore_slots = data.get("detection", {}).get(
+            "cooldown_change_ignore_by_slot", []
+        )
+        if not isinstance(raw_cooldown_change_ignore_slots, list):
+            raw_cooldown_change_ignore_slots = []
+        parsed_glow_delta_by_slot: dict[int, int] = {}
+        for k, v in raw_glow_delta_by_slot.items():
+            try:
+                slot_idx = int(k)
+                delta = int(v)
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            parsed_glow_delta_by_slot[slot_idx] = max(0, min(255, delta))
+        parsed_glow_ring_frac_by_slot: dict[int, float] = {}
+        for k, v in raw_glow_ring_frac_by_slot.items():
+            try:
+                slot_idx = int(k)
+                frac = float(v)
+            except Exception:
+                continue
+            if slot_idx < 0:
+                continue
+            parsed_glow_ring_frac_by_slot[slot_idx] = max(0.0, min(1.0, frac))
+        parsed_glow_override_slots: list[int] = []
+        seen_override_slots: set[int] = set()
+        for v in raw_glow_override_slots:
+            try:
+                slot_idx = int(v)
+            except Exception:
+                continue
+            if slot_idx < 0 or slot_idx in seen_override_slots:
+                continue
+            seen_override_slots.add(slot_idx)
+            parsed_glow_override_slots.append(slot_idx)
+        parsed_cooldown_change_ignore_slots: list[int] = []
+        seen_change_ignore_slots: set[int] = set()
+        for v in raw_cooldown_change_ignore_slots:
+            try:
+                slot_idx = int(v)
+            except Exception:
+                continue
+            if slot_idx < 0 or slot_idx in seen_change_ignore_slots:
+                continue
+            seen_change_ignore_slots.add(slot_idx)
+            parsed_cooldown_change_ignore_slots.append(slot_idx)
         hotkey_mode = (data.get("automation_hotkey_mode", "toggle") or "toggle").strip().lower()
         if hotkey_mode not in ("toggle", "single_fire"):
             hotkey_mode = "toggle"
@@ -391,6 +455,7 @@ class AppConfig:
                 "cooldown_change_pixel_fraction",
                 data.get("detection", {}).get("cooldown_pixel_fraction", 0.30),
             ),
+            cooldown_change_ignore_by_slot=parsed_cooldown_change_ignore_slots,
             cast_detection_enabled=data.get("detection", {}).get("cast_detection_enabled", True),
             cast_candidate_min_fraction=data.get("detection", {}).get("cast_candidate_min_fraction", 0.05),
             cast_candidate_max_fraction=data.get("detection", {}).get("cast_candidate_max_fraction", 0.22),
@@ -414,14 +479,17 @@ class AppConfig:
             glow_enabled=data.get("detection", {}).get("glow_enabled", True),
             glow_ring_thickness_px=int(data.get("detection", {}).get("glow_ring_thickness_px", 4)),
             glow_value_delta=int(data.get("detection", {}).get("glow_value_delta", 35)),
+            glow_value_delta_by_slot=parsed_glow_delta_by_slot,
             glow_saturation_min=int(data.get("detection", {}).get("glow_saturation_min", 80)),
             glow_ring_fraction=float(data.get("detection", {}).get("glow_ring_fraction", 0.18)),
+            glow_ring_fraction_by_slot=parsed_glow_ring_frac_by_slot,
             glow_red_ring_fraction=float(
                 data.get("detection", {}).get(
                     "glow_red_ring_fraction",
                     data.get("detection", {}).get("glow_ring_fraction", 0.18),
                 )
             ),
+            glow_override_cooldown_by_slot=parsed_glow_override_slots,
             glow_confirm_frames=int(data.get("detection", {}).get("glow_confirm_frames", 2)),
             glow_yellow_hue_min=int(data.get("detection", {}).get("glow_yellow_hue_min", 18)),
             glow_yellow_hue_max=int(data.get("detection", {}).get("glow_yellow_hue_max", 42)),
@@ -495,6 +563,9 @@ class AppConfig:
                 "cooldown_pixel_fraction": self.cooldown_pixel_fraction,
                 "cooldown_min_duration_ms": self.cooldown_min_duration_ms,
                 "cooldown_change_pixel_fraction": self.cooldown_change_pixel_fraction,
+                "cooldown_change_ignore_by_slot": [
+                    int(v) for v in list(self.cooldown_change_ignore_by_slot or [])
+                ],
                 "cast_detection_enabled": self.cast_detection_enabled,
                 "cast_candidate_min_fraction": self.cast_candidate_min_fraction,
                 "cast_candidate_max_fraction": self.cast_candidate_max_fraction,
@@ -512,9 +583,18 @@ class AppConfig:
                 "glow_enabled": self.glow_enabled,
                 "glow_ring_thickness_px": self.glow_ring_thickness_px,
                 "glow_value_delta": self.glow_value_delta,
+                "glow_value_delta_by_slot": {
+                    str(int(k)): int(v) for k, v in dict(self.glow_value_delta_by_slot or {}).items()
+                },
                 "glow_saturation_min": self.glow_saturation_min,
                 "glow_ring_fraction": self.glow_ring_fraction,
+                "glow_ring_fraction_by_slot": {
+                    str(int(k)): float(v) for k, v in dict(self.glow_ring_fraction_by_slot or {}).items()
+                },
                 "glow_red_ring_fraction": self.glow_red_ring_fraction,
+                "glow_override_cooldown_by_slot": [
+                    int(v) for v in list(self.glow_override_cooldown_by_slot or [])
+                ],
                 "glow_confirm_frames": self.glow_confirm_frames,
                 "glow_yellow_hue_min": self.glow_yellow_hue_min,
                 "glow_yellow_hue_max": self.glow_yellow_hue_max,
