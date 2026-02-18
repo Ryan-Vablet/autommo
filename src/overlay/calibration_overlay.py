@@ -34,6 +34,12 @@ class CalibrationOverlay(QWidget):
         self._slot_glow_ready: dict[int, bool] = {}
         self._slot_glow_candidate: dict[int, bool] = {}
         self._slot_glow_fraction: dict[int, float] = {}
+        self._slot_yellow_glow_ready: dict[int, bool] = {}
+        self._slot_yellow_glow_candidate: dict[int, bool] = {}
+        self._slot_yellow_glow_fraction: dict[int, float] = {}
+        self._slot_red_glow_ready: dict[int, bool] = {}
+        self._slot_red_glow_candidate: dict[int, bool] = {}
+        self._slot_red_glow_fraction: dict[int, float] = {}
 
         self._setup_window()
 
@@ -84,6 +90,12 @@ class CalibrationOverlay(QWidget):
         by_index_ready: dict[int, bool] = {}
         by_index_candidate: dict[int, bool] = {}
         by_index_fraction: dict[int, float] = {}
+        by_index_yellow_ready: dict[int, bool] = {}
+        by_index_yellow_candidate: dict[int, bool] = {}
+        by_index_yellow_fraction: dict[int, float] = {}
+        by_index_red_ready: dict[int, bool] = {}
+        by_index_red_candidate: dict[int, bool] = {}
+        by_index_red_fraction: dict[int, float] = {}
         for item in states or []:
             if not isinstance(item, dict):
                 continue
@@ -93,9 +105,21 @@ class CalibrationOverlay(QWidget):
             by_index_ready[idx] = bool(item.get("glow_ready", False))
             by_index_candidate[idx] = bool(item.get("glow_candidate", False))
             by_index_fraction[idx] = float(item.get("glow_fraction", 0.0) or 0.0)
+            by_index_yellow_ready[idx] = bool(item.get("yellow_glow_ready", False))
+            by_index_yellow_candidate[idx] = bool(item.get("yellow_glow_candidate", False))
+            by_index_yellow_fraction[idx] = float(item.get("yellow_glow_fraction", 0.0) or 0.0)
+            by_index_red_ready[idx] = bool(item.get("red_glow_ready", False))
+            by_index_red_candidate[idx] = bool(item.get("red_glow_candidate", False))
+            by_index_red_fraction[idx] = float(item.get("red_glow_fraction", 0.0) or 0.0)
         self._slot_glow_ready = by_index_ready
         self._slot_glow_candidate = by_index_candidate
         self._slot_glow_fraction = by_index_fraction
+        self._slot_yellow_glow_ready = by_index_yellow_ready
+        self._slot_yellow_glow_candidate = by_index_yellow_candidate
+        self._slot_yellow_glow_fraction = by_index_yellow_fraction
+        self._slot_red_glow_ready = by_index_red_ready
+        self._slot_red_glow_candidate = by_index_red_candidate
+        self._slot_red_glow_fraction = by_index_red_fraction
         self.update()
 
     def _slot_analyzed_rects(self) -> list[QRect]:
@@ -172,17 +196,22 @@ class CalibrationOverlay(QWidget):
             self._bbox.height,
         )
 
-        # Slot outlines. Glow-ready slots are highlighted in yellow.
+        # Slot outlines. Red-ready slots use red outline, yellow-ready use yellow.
         default_slot_pen = QPen(QColor("#FF00FF"), 1)
-        glow_slot_pen = QPen(QColor("#FFD84D"), 2)
+        yellow_slot_pen = QPen(QColor("#FFD84D"), 2)
+        red_slot_pen = QPen(QColor("#FF5A5A"), 2)
         for idx, rect in enumerate(self._slot_analyzed_rects()):
             if rect.width() > 0 and rect.height() > 0:
-                if self._slot_glow_ready.get(idx, False):
-                    painter.setPen(glow_slot_pen)
+                red_ready = self._slot_red_glow_ready.get(idx, False)
+                yellow_ready = self._slot_yellow_glow_ready.get(idx, False)
+                if red_ready:
+                    painter.setPen(red_slot_pen)
+                elif yellow_ready:
+                    painter.setPen(yellow_slot_pen)
                 else:
                     painter.setPen(default_slot_pen)
                 painter.drawRect(rect)
-                if self._slot_glow_ready.get(idx, False):
+                if red_ready or yellow_ready:
                     marker_size = max(4, min(10, rect.width() // 5, rect.height() // 5))
                     marker = QRect(
                         rect.left() + 1,
@@ -190,19 +219,36 @@ class CalibrationOverlay(QWidget):
                         marker_size,
                         marker_size,
                     )
-                    painter.fillRect(marker, QColor(255, 216, 77, 200))
-                status_char = "G" if self._slot_glow_ready.get(idx, False) else (
-                    "g" if self._slot_glow_candidate.get(idx, False) else "."
+                    painter.fillRect(
+                        marker, QColor(255, 90, 90, 210) if red_ready else QColor(255, 216, 77, 200)
+                    )
+                yellow_candidate = self._slot_yellow_glow_candidate.get(idx, False)
+                red_candidate = self._slot_red_glow_candidate.get(idx, False)
+                yellow_frac = self._slot_yellow_glow_fraction.get(idx, 0.0)
+                red_frac = self._slot_red_glow_fraction.get(idx, 0.0)
+                dot_ok = (not yellow_ready and not red_ready) or red_ready
+                y_status = "Y" if yellow_ready else ("y" if yellow_candidate else ".")
+                r_status = "R" if red_ready else ("r" if red_candidate else ".")
+                d_status = "D+" if dot_ok else "D-"
+                painter.setPen(
+                    QPen(
+                        QColor("#FF5A5A")
+                        if red_ready or red_candidate
+                        else (QColor("#FFD84D") if yellow_ready or yellow_candidate else QColor("#888888")),
+                        1,
+                    )
                 )
-                frac = self._slot_glow_fraction.get(idx, 0.0)
-                painter.setPen(QPen(QColor("#FFD84D") if status_char != "." else QColor("#888888"), 1))
-                painter.drawText(rect.left() + 2, rect.bottom() - 3, f"{status_char}{frac:.2f}")
+                painter.drawText(
+                    rect.left() + 2,
+                    rect.bottom() - 3,
+                    f"{d_status} {y_status}{yellow_frac:.2f} {r_status}{red_frac:.2f}",
+                )
 
         painter.setPen(QPen(QColor("#AAAAAA"), 1))
         painter.drawText(
             self._bbox.left + 4,
             self._bbox.top - 6 if self._bbox.top > 14 else self._bbox.top + 12,
-            "Glow: G=ready, g=candidate",
+            "Dot debug: D+=eligible D-=blocked | Y/y yellow | R/r red",
         )
 
         # Cyan 2px outline for cast-bar ROI (if enabled)

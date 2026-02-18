@@ -39,6 +39,8 @@ class _SlotRuntime:
     last_cast_success_at: Optional[float] = None
     last_darkened_fraction: float = 0.0
     glow_candidate_frames: int = 0
+    yellow_glow_candidate_frames: int = 0
+    red_glow_candidate_frames: int = 0
 
 
 class SlotAnalyzer:
@@ -156,27 +158,45 @@ class SlotAnalyzer:
         self._ring_mask_cache[key] = mask
         return mask
 
-    def _glow_signal(self, slot_img: np.ndarray, baseline_bright: np.ndarray) -> tuple[bool, float]:
+    def _glow_signal(
+        self, slot_img: np.ndarray, baseline_bright: np.ndarray
+    ) -> tuple[bool, float, bool, float]:
         if not bool(getattr(self._config, "glow_enabled", True)):
-            return False, 0.0
+            return False, 0.0, False, 0.0
         h, w = baseline_bright.shape
         if slot_img.shape[0] != h or slot_img.shape[1] != w:
-            return False, 0.0
+            return False, 0.0, False, 0.0
         ring_thickness = int(getattr(self._config, "glow_ring_thickness_px", 4) or 4)
         ring = self._ring_mask(h, w, ring_thickness)
         if not np.any(ring):
-            return False, 0.0
+            return False, 0.0, False, 0.0
 
         hsv = cv2.cvtColor(slot_img, cv2.COLOR_BGR2HSV)
+        hue = hsv[:, :, 0].astype(np.int16)
         sat = hsv[:, :, 1].astype(np.int16)
         val = hsv[:, :, 2].astype(np.int16)
         base = baseline_bright.astype(np.int16)
         value_delta = int(getattr(self._config, "glow_value_delta", 35) or 35)
         sat_min = int(getattr(self._config, "glow_saturation_min", 80) or 80)
-        cond = (val >= (base + value_delta)) & (sat >= sat_min)
-        glow_fraction = float(np.mean(cond[ring])) if np.any(ring) else 0.0
+        bright_colored = (val >= (base + value_delta)) & (sat >= sat_min)
+
+        yellow_h_min = int(getattr(self._config, "glow_yellow_hue_min", 18) or 18)
+        yellow_h_max = int(getattr(self._config, "glow_yellow_hue_max", 42) or 42)
+        red_h_max_low = int(getattr(self._config, "glow_red_hue_max_low", 12) or 12)
+        red_h_min_high = int(getattr(self._config, "glow_red_hue_min_high", 168) or 168)
+
+        yellow_cond = bright_colored & (hue >= yellow_h_min) & (hue <= yellow_h_max)
+        red_cond = bright_colored & ((hue <= red_h_max_low) | (hue >= red_h_min_high))
+
+        yellow_fraction = float(np.mean(yellow_cond[ring])) if np.any(ring) else 0.0
+        red_fraction = float(np.mean(red_cond[ring])) if np.any(ring) else 0.0
         glow_frac_thresh = float(getattr(self._config, "glow_ring_fraction", 0.18) or 0.18)
-        return glow_fraction >= glow_frac_thresh, glow_fraction
+        return (
+            yellow_fraction >= glow_frac_thresh,
+            yellow_fraction,
+            red_fraction >= glow_frac_thresh,
+            red_fraction,
+        )
 
     def calibrate_baselines(self, frame: np.ndarray) -> None:
         """Capture current frame as the 'ready' baseline for all slots.
@@ -572,6 +592,12 @@ class SlotAnalyzer:
             glow_ready = False
             glow_candidate = False
             glow_fraction = 0.0
+            yellow_glow_ready = False
+            yellow_glow_candidate = False
+            yellow_glow_fraction = 0.0
+            red_glow_ready = False
+            red_glow_candidate = False
+            red_glow_fraction = 0.0
 
             if (
                 current_bright.size == 0
@@ -615,16 +641,33 @@ class SlotAnalyzer:
                     cast_gate_active=cast_gate_active,
                 )
                 runtime = self._runtime.setdefault(slot_cfg.index, _SlotRuntime())
-                glow_candidate, glow_fraction = self._glow_signal(slot_img, baseline_bright)
+                (
+                    yellow_glow_candidate,
+                    yellow_glow_fraction,
+                    red_glow_candidate,
+                    red_glow_fraction,
+                ) = self._glow_signal(slot_img, baseline_bright)
+                glow_candidate = yellow_glow_candidate or red_glow_candidate
+                glow_fraction = max(yellow_glow_fraction, red_glow_fraction)
                 if glow_candidate:
                     runtime.glow_candidate_frames += 1
                 else:
                     runtime.glow_candidate_frames = 0
+                if yellow_glow_candidate:
+                    runtime.yellow_glow_candidate_frames += 1
+                else:
+                    runtime.yellow_glow_candidate_frames = 0
+                if red_glow_candidate:
+                    runtime.red_glow_candidate_frames += 1
+                else:
+                    runtime.red_glow_candidate_frames = 0
                 glow_ready = runtime.glow_candidate_frames >= glow_confirm_frames
+                yellow_glow_ready = runtime.yellow_glow_candidate_frames >= glow_confirm_frames
+                red_glow_ready = runtime.red_glow_candidate_frames >= glow_confirm_frames
                 # Glow is a strong "usable now" cue for many MMOs. Only let it
                 # override cooldown when cooldown came from generic change-delta
                 # and not from strong darkening.
-                if glow_ready and state == SlotState.ON_COOLDOWN and (not raw_dark_cooldown):
+                if red_glow_ready and state == SlotState.ON_COOLDOWN and (not raw_dark_cooldown):
                     state = SlotState.READY
                 if cast_bar_active and bool(
                     getattr(self._config, "lock_ready_while_cast_bar_active", False)
@@ -648,6 +691,12 @@ class SlotAnalyzer:
                     glow_candidate=bool(glow_candidate),
                     glow_fraction=float(glow_fraction),
                     glow_ready=bool(glow_ready),
+                    yellow_glow_candidate=bool(yellow_glow_candidate),
+                    yellow_glow_fraction=float(yellow_glow_fraction),
+                    yellow_glow_ready=bool(yellow_glow_ready),
+                    red_glow_candidate=bool(red_glow_candidate),
+                    red_glow_fraction=float(red_glow_fraction),
+                    red_glow_ready=bool(red_glow_ready),
                     timestamp=now,
                 )
             )

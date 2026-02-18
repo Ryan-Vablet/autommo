@@ -179,6 +179,14 @@ class CaptureWorker(QThread):
                             "glow_candidate": bool(getattr(s, "glow_candidate", False)),
                             "glow_fraction": float(getattr(s, "glow_fraction", 0.0) or 0.0),
                             "glow_ready": bool(getattr(s, "glow_ready", False)),
+                            "yellow_glow_candidate": bool(getattr(s, "yellow_glow_candidate", False)),
+                            "yellow_glow_fraction": float(
+                                getattr(s, "yellow_glow_fraction", 0.0) or 0.0
+                            ),
+                            "yellow_glow_ready": bool(getattr(s, "yellow_glow_ready", False)),
+                            "red_glow_candidate": bool(getattr(s, "red_glow_candidate", False)),
+                            "red_glow_fraction": float(getattr(s, "red_glow_fraction", 0.0) or 0.0),
+                            "red_glow_ready": bool(getattr(s, "red_glow_ready", False)),
                             "brightness": s.brightness,
                         }
                         for s in state.slots
