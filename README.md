@@ -62,7 +62,7 @@ The order here is the **priority order** for the currently active automation pro
   - **Activation: Always** Ã¢â‚¬â€ sends whenever that slot is ready.
 
   - **Ready Source: Use slot icon state** â€” default behavior.
-  - **Ready Source: Buff present / Buff missing** â€” uses selected Buff ROI state instead of slot icon readiness.
+  - **Ready Source: Buff present / Buff missing** â€” uses selected Buff ROI state as an additional gate on top of slot icon readiness.
 
 The right panel also shows:
 
@@ -163,4 +163,5 @@ Behavior in v1:
   - Buff present
   - Buff missing
 - Buff-gated readiness requires a calibrated Present template for that ROI.
-- For actions using `buff_missing`, readiness is true when the calibrated present template is not found.
+- For actions using `buff_missing`, readiness requires the calibrated present template to be absent and the slot icon to be ready.
+- With `Activation: DoT refresh`, buff-gated slot items must still pass buff gate; confirmed red glow only overrides slot-icon readiness.

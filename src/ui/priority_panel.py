@@ -345,7 +345,9 @@ class PriorityItemWidget(QFrame):
             always_action = menu.addAction("Activation: Always")
             always_action.setCheckable(True)
             always_action.setChecked(self._activation_rule == "always")
-            dot_refresh_action = menu.addAction("Activation: DoT refresh (no glow or red)")
+            dot_refresh_action = menu.addAction(
+                "Activation: DoT refresh (no glow or red; buff gate required, red overrides slot)"
+            )
             dot_refresh_action.setCheckable(True)
             dot_refresh_action.setChecked(self._activation_rule == "dot_refresh")
             menu.addSeparator()

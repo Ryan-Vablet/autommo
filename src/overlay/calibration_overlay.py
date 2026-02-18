@@ -291,6 +291,10 @@ class CalibrationOverlay(QWidget):
             state = self._buff_states.get(buff_id, {})
             present = bool(state.get("present", False))
             calibrated = bool(state.get("calibrated", False))
+            status = str(state.get("status", "ok") or "ok").strip().lower()
+            similarity = float(state.get("present_similarity", 0.0) or 0.0)
+            red_ready = bool(state.get("red_glow_ready", False))
+            red_candidate = bool(state.get("red_glow_candidate", False))
             color = QColor("#35D07F") if present else QColor("#FF884D")
             if not calibrated:
                 color = QColor("#BBBBBB")
@@ -300,10 +304,11 @@ class CalibrationOverlay(QWidget):
             tag = "P" if present else "M"
             if not calibrated:
                 tag = "U"
+            red_tag = "R" if red_ready else ("r" if red_candidate else ".")
             painter.drawText(
                 rect.left() + 2,
                 rect.top() - 4 if rect.top() > 10 else rect.top() + 12,
-                f"BUFF {name}: {tag}",
+                f"BUFF {name}: {tag} {red_tag} {status} S{similarity:.2f}",
             )
 
         painter.end()

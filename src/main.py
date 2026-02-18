@@ -110,7 +110,7 @@ class CaptureWorker(QThread):
         logger.info(f"Capture worker switched to monitor {monitor_index}")
 
     def _capture_plan(self, monitor_width: int, monitor_height: int) -> tuple[BoundingBox, tuple[int, int]]:
-        """Return capture bbox (possibly expanded for cast ROI) and action origin inside it."""
+        """Return capture bbox (expanded for cast ROI and buff ROIs) and action origin inside it."""
         action_bbox = self._config.bounding_box
         left = int(action_bbox.left)
         top = int(action_bbox.top)
@@ -130,6 +130,25 @@ class CaptureWorker(QThread):
                 top = min(top, cast_top)
                 right = max(right, cast_right)
                 bottom = max(bottom, cast_bottom)
+
+        # Buff ROIs are relative to action bar and may sit outside action bbox.
+        for raw in list(getattr(self._config, "buff_rois", []) or []):
+            if not isinstance(raw, dict):
+                continue
+            if not bool(raw.get("enabled", True)):
+                continue
+            roi_w = int(raw.get("width", 0))
+            roi_h = int(raw.get("height", 0))
+            if roi_w <= 1 or roi_h <= 1:
+                continue
+            roi_left = int(action_bbox.left) + int(raw.get("left", 0))
+            roi_top = int(action_bbox.top) + int(raw.get("top", 0))
+            roi_right = roi_left + roi_w
+            roi_bottom = roi_top + roi_h
+            left = min(left, roi_left)
+            top = min(top, roi_top)
+            right = max(right, roi_right)
+            bottom = max(bottom, roi_bottom)
 
         # Clamp to selected monitor bounds (coords are monitor-relative).
         left = max(0, min(left, monitor_width - 1))

@@ -50,6 +50,7 @@ class _BuffRuntime:
     """Per-buff temporal memory for template match confirmation."""
 
     candidate_frames: int = 0
+    red_glow_candidate_frames: int = 0
 
 
 class SlotAnalyzer:
@@ -442,12 +443,28 @@ class SlotAnalyzer:
                 interpolation=cv2.INTER_AREA,
             )
         diff = cv2.absdiff(gray_roi, gray_template)
-        return max(0.0, 1.0 - (float(np.mean(diff)) / 255.0))
+        diff_score = max(0.0, 1.0 - (float(np.mean(diff)) / 255.0))
+
+        # Add normalized correlation so global grayscale similarity alone
+        # does not mark unrelated ROIs as "present" at low thresholds.
+        roi_std = float(np.std(gray_roi))
+        template_std = float(np.std(gray_template))
+        if roi_std < 1e-6 or template_std < 1e-6:
+            return diff_score
+        corr = cv2.matchTemplate(gray_roi, gray_template, cv2.TM_CCOEFF_NORMED)
+        corr_raw = float(corr[0, 0]) if corr.size else -1.0
+        corr_score = max(0.0, min(1.0, (corr_raw + 1.0) * 0.5))
+        return min(diff_score, corr_score)
 
     def _analyze_buffs(self, frame: np.ndarray, action_origin: tuple[int, int]) -> None:
         states: dict[str, dict] = {}
         action_x = int(action_origin[0])
         action_y = int(action_origin[1])
+        red_h_max_low = int(getattr(self._config, "glow_red_hue_max_low", 12) or 12)
+        red_h_min_high = int(getattr(self._config, "glow_red_hue_min_high", 168) or 168)
+        sat_min = int(getattr(self._config, "glow_saturation_min", 80) or 80)
+        glow_confirm_frames = max(1, int(getattr(self._config, "glow_confirm_frames", 2) or 2))
+        red_frac_thresh = float(getattr(self._config, "glow_red_ring_fraction", 0.18) or 0.18)
         for raw in list(getattr(self._config, "buff_rois", []) or []):
             if not isinstance(raw, dict):
                 continue
@@ -473,15 +490,21 @@ class SlotAnalyzer:
             missing_similarity = 0.0
             candidate = False
             present = False
+            red_glow_candidate = False
+            red_glow_ready = False
+            red_glow_fraction = 0.0
             if not enabled:
                 status = "off"
                 runtime.candidate_frames = 0
+                runtime.red_glow_candidate_frames = 0
             elif width <= 1 or height <= 1:
                 status = "invalid-roi"
                 runtime.candidate_frames = 0
+                runtime.red_glow_candidate_frames = 0
             elif not calibrated:
                 status = "uncalibrated"
                 runtime.candidate_frames = 0
+                runtime.red_glow_candidate_frames = 0
             else:
                 x1 = action_x + left
                 y1 = action_y + top
@@ -490,6 +513,7 @@ class SlotAnalyzer:
                 if x1 < 0 or y1 < 0 or x2 > frame.shape[1] or y2 > frame.shape[0]:
                     status = "out-of-frame"
                     runtime.candidate_frames = 0
+                    runtime.red_glow_candidate_frames = 0
                 else:
                     roi = frame[y1:y2, x1:x2]
                     roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -500,6 +524,28 @@ class SlotAnalyzer:
                     else:
                         runtime.candidate_frames = 0
                     present = runtime.candidate_frames >= confirm_frames
+
+                    # Buff ROI red-glow detection used by buff-sourced DoT refresh rules.
+                    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                    hue = hsv[:, :, 0].astype(np.int16)
+                    sat = hsv[:, :, 1].astype(np.int16)
+                    val = hsv[:, :, 2].astype(np.int16)
+                    h, w = roi_gray.shape
+                    ring = self._ring_mask(h, w, int(getattr(self._config, "glow_ring_thickness_px", 4) or 4))
+                    if np.any(ring):
+                        val_floor = max(64, int(np.percentile(val[ring], 60)))
+                        red_cond = (
+                            ((hue <= red_h_max_low) | (hue >= red_h_min_high))
+                            & (sat >= sat_min)
+                            & (val >= val_floor)
+                        )
+                        red_glow_fraction = float(np.mean(red_cond[ring]))
+                        red_glow_candidate = red_glow_fraction >= red_frac_thresh
+                    if red_glow_candidate:
+                        runtime.red_glow_candidate_frames += 1
+                    else:
+                        runtime.red_glow_candidate_frames = 0
+                    red_glow_ready = runtime.red_glow_candidate_frames >= glow_confirm_frames
 
             states[buff_id] = {
                 "id": buff_id,
@@ -517,6 +563,10 @@ class SlotAnalyzer:
                 "candidate_frames": int(runtime.candidate_frames),
                 "confirm_frames": int(confirm_frames),
                 "present": bool(present),
+                "red_glow_candidate": bool(red_glow_candidate),
+                "red_glow_candidate_frames": int(runtime.red_glow_candidate_frames),
+                "red_glow_fraction": float(red_glow_fraction),
+                "red_glow_ready": bool(red_glow_ready),
             }
         self._buff_states = states
 
