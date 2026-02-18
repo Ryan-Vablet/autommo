@@ -253,6 +253,57 @@ class PriorityRulesTests(unittest.TestCase):
         )
         self.assertFalse(slot_item_is_eligible_for_snapshot(item, slot, buff_states={}))
 
+    def test_require_glow_state_dict_requires_slot_ready_and_glow(self) -> None:
+        item = {
+            "type": "slot",
+            "slot_index": 0,
+            "activation_rule": "require_glow",
+            "ready_source": "slot",
+        }
+        self.assertTrue(
+            slot_item_is_eligible_for_state_dict(
+                item,
+                {"state": "ready", "glow_ready": True},
+                buff_states={},
+            )
+        )
+        self.assertFalse(
+            slot_item_is_eligible_for_state_dict(
+                item,
+                {"state": "ready", "glow_ready": False},
+                buff_states={},
+            )
+        )
+        self.assertFalse(
+            slot_item_is_eligible_for_state_dict(
+                item,
+                {"state": "on_cooldown", "glow_ready": True},
+                buff_states={},
+            )
+        )
+
+    def test_require_glow_snapshot_requires_glow_ready(self) -> None:
+        item = {
+            "type": "slot",
+            "slot_index": 0,
+            "activation_rule": "require_glow",
+            "ready_source": "slot",
+        }
+        slot_glow = SlotSnapshot(
+            index=0,
+            state=SlotState.READY,
+            glow_ready=True,
+        )
+        slot_no_glow = SlotSnapshot(
+            index=0,
+            state=SlotState.READY,
+            glow_ready=False,
+        )
+        self.assertTrue(slot_item_is_eligible_for_snapshot(item, slot_glow, buff_states={}))
+        self.assertFalse(
+            slot_item_is_eligible_for_snapshot(item, slot_no_glow, buff_states={})
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

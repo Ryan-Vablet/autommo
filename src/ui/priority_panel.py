@@ -220,6 +220,8 @@ class PriorityItemWidget(QFrame):
         tokens: list[str] = []
         if self._item_type == "slot" and self._activation_rule == "dot_refresh":
             tokens.append("DOT")
+        if self._item_type == "slot" and self._activation_rule == "require_glow":
+            tokens.append("GLW")
         if self._ready_source == "buff_present":
             tokens.append(f"B+:{self._buff_name(self._buff_roi_id)}")
         elif self._ready_source == "buff_missing":
@@ -339,6 +341,7 @@ class PriorityItemWidget(QFrame):
         remove_action = None
         always_action = None
         dot_refresh_action = None
+        require_glow_action = None
         ready_always_action = None
         slot_ready_action = None
         ready_actions: dict[object, tuple[str, str]] = {}
@@ -378,6 +381,11 @@ class PriorityItemWidget(QFrame):
             )
             dot_refresh_action.setCheckable(True)
             dot_refresh_action.setChecked(self._activation_rule == "dot_refresh")
+            require_glow_action = menu.addAction(
+                "Activation: Require glow (confirmed yellow/red ring required)"
+            )
+            require_glow_action.setCheckable(True)
+            require_glow_action.setChecked(self._activation_rule == "require_glow")
             menu.addSeparator()
             ready_menu = menu.addMenu("Ready Source")
             ready_always_action = ready_menu.addAction("Always")
@@ -424,6 +432,8 @@ class PriorityItemWidget(QFrame):
             parent._on_slot_item_activation_rule_changed(self._item_key, "always")
         elif chosen == dot_refresh_action:
             parent._on_slot_item_activation_rule_changed(self._item_key, "dot_refresh")
+        elif chosen == require_glow_action:
+            parent._on_slot_item_activation_rule_changed(self._item_key, "require_glow")
         elif chosen == ready_always_action:
             parent._on_item_ready_source_changed(self._item_key, "always", "")
         elif chosen == slot_ready_action:

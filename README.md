@@ -9,7 +9,7 @@ A Python desktop app that reads MMO action bar cooldowns via screen capture and 
 - **Shows** a transparent overlay so you can align the capture region with your action bar
 - **Displays** live slot states (green = ready, blue = casting, amber = channeling, red = on cooldown, gray = locked)
 - **Automation**: when enabled, presses keys in a **priority order**Ã¢â‚¬â€only the first *ready* ability in the list is triggered, with a minimum delay between keypresses, cast-aware blocking/queue timing, and an optional Ã¢â‚¬Å“target windowÃ¢â‚¬Â check so keys are only sent when the game has focus
-- **Per-slot activation rules**: each slot item in Priority can be set to **Always** or **DoT refresh** (`no glow` or `red glow`)
+- **Per-slot activation rules**: each slot item in Priority can be set to **Always**, **DoT refresh** (`no glow` or `red glow`), or **Require glow** (confirmed yellow/red glow required)
 
 ## Setup
 
@@ -60,6 +60,7 @@ The order here is the **priority order** for the currently active automation pro
 - **Remove** Ã¢â‚¬â€ Drag a priority item outside of the **Priority panel** It will be removed from the list.
 - **Slot activation rule** Ã¢â‚¬â€ Right-click a slot item in the Priority list:
   - **Activation: Always** Ã¢â‚¬â€ sends whenever that slot is ready.
+  - **Activation: Require glow** â€” sends only when the slot is ready and glow is confirmed.
 
   - **Ready Source: Use slot icon state** â€” default behavior.
   - **Ready Source: Buff present / Buff missing** â€” uses selected Buff ROI state as an additional gate on top of slot icon readiness.
@@ -169,3 +170,4 @@ Behavior in v1:
 - Buff-gated readiness requires a calibrated Present template for that ROI.
 - For actions using `buff_missing`, readiness requires the calibrated present template to be absent and the slot icon to be ready.
 - With `Activation: DoT refresh`, buff-gated slot items must still pass buff gate; confirmed red glow only overrides slot-icon readiness.
+- With `Activation: Require glow`, buff-gated slot items must still pass buff gate, and slot-icon readiness plus confirmed glow are both required.
