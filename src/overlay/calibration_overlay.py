@@ -31,6 +31,9 @@ class CalibrationOverlay(QWidget):
         self._slot_count = 10
         self._slot_gap = 2
         self._slot_padding = 3
+        self._slot_glow_ready: dict[int, bool] = {}
+        self._slot_glow_candidate: dict[int, bool] = {}
+        self._slot_glow_fraction: dict[int, float] = {}
 
         self._setup_window()
 
@@ -74,6 +77,25 @@ class CalibrationOverlay(QWidget):
     def update_cast_bar_region(self, region: Optional[dict]) -> None:
         """Update cast-bar ROI (relative to capture bbox) and repaint."""
         self._cast_bar_region = dict(region or {})
+        self.update()
+
+    def update_slot_states(self, states: list[dict]) -> None:
+        """Update per-slot live flags from analyzer output (e.g., glow-ready)."""
+        by_index_ready: dict[int, bool] = {}
+        by_index_candidate: dict[int, bool] = {}
+        by_index_fraction: dict[int, float] = {}
+        for item in states or []:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("index")
+            if not isinstance(idx, int):
+                continue
+            by_index_ready[idx] = bool(item.get("glow_ready", False))
+            by_index_candidate[idx] = bool(item.get("glow_candidate", False))
+            by_index_fraction[idx] = float(item.get("glow_fraction", 0.0) or 0.0)
+        self._slot_glow_ready = by_index_ready
+        self._slot_glow_candidate = by_index_candidate
+        self._slot_glow_fraction = by_index_fraction
         self.update()
 
     def _slot_analyzed_rects(self) -> list[QRect]:
@@ -120,6 +142,25 @@ class CalibrationOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        monitor_local = QRect(0, 0, self.width(), self.height())
+        bbox_local = QRect(
+            self._bbox.left - self._monitor_geometry.left(),
+            self._bbox.top - self._monitor_geometry.top(),
+            self._bbox.width,
+            self._bbox.height,
+        )
+        if not monitor_local.intersects(bbox_local):
+            painter.setPen(QPen(QColor("#FF5555"), 2))
+            painter.drawRect(10, 10, 380, 28)
+            painter.setPen(QPen(QColor("#FFB0B0"), 1))
+            painter.drawText(
+                16,
+                29,
+                f"Overlay bbox off-screen: L{self._bbox.left} T{self._bbox.top} W{self._bbox.width} H{self._bbox.height}",
+            )
+            painter.end()
+            return
+
         # Green bounding box
         pen = QPen(self._border_color, self._border_width)
         painter.setPen(pen)
@@ -131,12 +172,38 @@ class CalibrationOverlay(QWidget):
             self._bbox.height,
         )
 
-        # Pink/magenta 1px outlines for each analyzed slot region
-        slot_pen = QPen(QColor("#FF00FF"), 1)
-        painter.setPen(slot_pen)
-        for rect in self._slot_analyzed_rects():
+        # Slot outlines. Glow-ready slots are highlighted in yellow.
+        default_slot_pen = QPen(QColor("#FF00FF"), 1)
+        glow_slot_pen = QPen(QColor("#FFD84D"), 2)
+        for idx, rect in enumerate(self._slot_analyzed_rects()):
             if rect.width() > 0 and rect.height() > 0:
+                if self._slot_glow_ready.get(idx, False):
+                    painter.setPen(glow_slot_pen)
+                else:
+                    painter.setPen(default_slot_pen)
                 painter.drawRect(rect)
+                if self._slot_glow_ready.get(idx, False):
+                    marker_size = max(4, min(10, rect.width() // 5, rect.height() // 5))
+                    marker = QRect(
+                        rect.left() + 1,
+                        rect.top() + 1,
+                        marker_size,
+                        marker_size,
+                    )
+                    painter.fillRect(marker, QColor(255, 216, 77, 200))
+                status_char = "G" if self._slot_glow_ready.get(idx, False) else (
+                    "g" if self._slot_glow_candidate.get(idx, False) else "."
+                )
+                frac = self._slot_glow_fraction.get(idx, 0.0)
+                painter.setPen(QPen(QColor("#FFD84D") if status_char != "." else QColor("#888888"), 1))
+                painter.drawText(rect.left() + 2, rect.bottom() - 3, f"{status_char}{frac:.2f}")
+
+        painter.setPen(QPen(QColor("#AAAAAA"), 1))
+        painter.drawText(
+            self._bbox.left + 4,
+            self._bbox.top - 6 if self._bbox.top > 14 else self._bbox.top + 12,
+            "Glow: G=ready, g=candidate",
+        )
 
         # Cyan 2px outline for cast-bar ROI (if enabled)
         cast_bar_rect = self._cast_bar_rect()

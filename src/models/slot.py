@@ -41,6 +41,9 @@ class SlotSnapshot:
     cast_ends_at: Optional[float] = None
     last_cast_start_at: Optional[float] = None
     last_cast_success_at: Optional[float] = None
+    glow_candidate: bool = False
+    glow_fraction: float = 0.0
+    glow_ready: bool = False
     brightness: float = 0.0
     timestamp: float = 0.0
 
@@ -104,6 +107,8 @@ class AppConfig:
     brightness_drop_threshold: int = 40  # 0-255; pixel counts as darkened if brightness dropped by more
     cooldown_pixel_fraction: float = 0.30  # ON_COOLDOWN if this fraction of pixels darkened
     cooldown_min_duration_ms: int = 2000
+    # Extra detector: absolute baseline change fraction (captures bright overlays).
+    cooldown_change_pixel_fraction: float = 0.30
     cast_detection_enabled: bool = True
     cast_candidate_min_fraction: float = 0.05
     cast_candidate_max_fraction: float = 0.22
@@ -118,6 +123,12 @@ class AppConfig:
     cast_bar_region: dict = field(default_factory=dict)
     cast_bar_activity_threshold: float = 12.0
     cast_bar_history_frames: int = 8
+    glow_enabled: bool = True
+    glow_ring_thickness_px: int = 4
+    glow_value_delta: int = 35
+    glow_saturation_min: int = 80
+    glow_ring_fraction: float = 0.18
+    glow_confirm_frames: int = 2
     ocr_enabled: bool = True
     overlay_enabled: bool = True
     overlay_border_color: str = "#00FF00"
@@ -344,6 +355,10 @@ class AppConfig:
             ),
             cooldown_pixel_fraction=data.get("detection", {}).get("cooldown_pixel_fraction", 0.30),
             cooldown_min_duration_ms=data.get("detection", {}).get("cooldown_min_duration_ms", 2000),
+            cooldown_change_pixel_fraction=data.get("detection", {}).get(
+                "cooldown_change_pixel_fraction",
+                data.get("detection", {}).get("cooldown_pixel_fraction", 0.30),
+            ),
             cast_detection_enabled=data.get("detection", {}).get("cast_detection_enabled", True),
             cast_candidate_min_fraction=data.get("detection", {}).get("cast_candidate_min_fraction", 0.05),
             cast_candidate_max_fraction=data.get("detection", {}).get("cast_candidate_max_fraction", 0.22),
@@ -364,6 +379,12 @@ class AppConfig:
                 12.0,
             ),
             cast_bar_history_frames=data.get("detection", {}).get("cast_bar_history_frames", 8),
+            glow_enabled=data.get("detection", {}).get("glow_enabled", True),
+            glow_ring_thickness_px=int(data.get("detection", {}).get("glow_ring_thickness_px", 4)),
+            glow_value_delta=int(data.get("detection", {}).get("glow_value_delta", 35)),
+            glow_saturation_min=int(data.get("detection", {}).get("glow_saturation_min", 80)),
+            glow_ring_fraction=float(data.get("detection", {}).get("glow_ring_fraction", 0.18)),
+            glow_confirm_frames=int(data.get("detection", {}).get("glow_confirm_frames", 2)),
             ocr_enabled=data.get("detection", {}).get("ocr_enabled", True),
             overlay_enabled=data.get("overlay", {}).get("enabled", True),
             overlay_border_color=data.get("overlay", {}).get("border_color", "#00FF00"),
@@ -431,6 +452,7 @@ class AppConfig:
                 "brightness_drop_threshold": self.brightness_drop_threshold,
                 "cooldown_pixel_fraction": self.cooldown_pixel_fraction,
                 "cooldown_min_duration_ms": self.cooldown_min_duration_ms,
+                "cooldown_change_pixel_fraction": self.cooldown_change_pixel_fraction,
                 "cast_detection_enabled": self.cast_detection_enabled,
                 "cast_candidate_min_fraction": self.cast_candidate_min_fraction,
                 "cast_candidate_max_fraction": self.cast_candidate_max_fraction,
@@ -445,6 +467,12 @@ class AppConfig:
                 "cast_bar_region": self.cast_bar_region,
                 "cast_bar_activity_threshold": self.cast_bar_activity_threshold,
                 "cast_bar_history_frames": self.cast_bar_history_frames,
+                "glow_enabled": self.glow_enabled,
+                "glow_ring_thickness_px": self.glow_ring_thickness_px,
+                "glow_value_delta": self.glow_value_delta,
+                "glow_saturation_min": self.glow_saturation_min,
+                "glow_ring_fraction": self.glow_ring_fraction,
+                "glow_confirm_frames": self.glow_confirm_frames,
                 "ocr_enabled": self.ocr_enabled,
             },
             "overlay": {

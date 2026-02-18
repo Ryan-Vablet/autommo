@@ -228,6 +228,81 @@ class SettingsDialog(QDialog):
         trigger_row.addWidget(self._pixel_fraction_label)
         trigger_row.addWidget(trigger_help)
         fl.addRow(_row_label("Trigger:"), trigger_row)
+        self._slider_change_pixel_fraction = QSlider(Qt.Orientation.Horizontal)
+        self._slider_change_pixel_fraction.setRange(10, 90)
+        self._slider_change_pixel_fraction.setSingleStep(5)
+        self._change_pixel_fraction_label = QLabel("0.30")
+        self._change_pixel_fraction_label.setMinimumWidth(32)
+        self._change_pixel_fraction_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+        change_help = QLabel("(?)")
+        change_help.setToolTip(
+            "Fraction of pixels that may differ from baseline (dark or bright) before marking not-ready."
+        )
+        change_help.setStyleSheet("color: #666; font-size: 11px;")
+        change_row = QHBoxLayout()
+        change_row.addWidget(self._slider_change_pixel_fraction)
+        change_row.addWidget(self._change_pixel_fraction_label)
+        change_row.addWidget(change_help)
+        fl.addRow(_row_label("Change:"), change_row)
+        self._check_glow_enabled = QCheckBox("Enable glow ready override")
+        self._check_glow_enabled.setToolTip(
+            "If enabled, confirmed icon glow can mark a slot ready even when generic change-delta says not-ready."
+        )
+        fl.addRow("", self._check_glow_enabled)
+        glow_row = QHBoxLayout()
+        self._spin_glow_ring_thickness = QSpinBox()
+        self._spin_glow_ring_thickness.setRange(1, 12)
+        self._spin_glow_ring_thickness.setPrefix("ring ")
+        self._spin_glow_ring_thickness.setMaximumWidth(92)
+        self._spin_glow_ring_thickness.setToolTip(
+            "Thickness of the edge ring (pixels) used to look for glow."
+        )
+        self._spin_glow_value_delta = QSpinBox()
+        self._spin_glow_value_delta.setRange(5, 120)
+        self._spin_glow_value_delta.setPrefix("V+ ")
+        self._spin_glow_value_delta.setMaximumWidth(82)
+        self._spin_glow_value_delta.setToolTip(
+            "Minimum brightness increase vs baseline in the ring to count as glow."
+        )
+        self._spin_glow_saturation_min = QSpinBox()
+        self._spin_glow_saturation_min.setRange(0, 255)
+        self._spin_glow_saturation_min.setPrefix("S>= ")
+        self._spin_glow_saturation_min.setMaximumWidth(86)
+        self._spin_glow_saturation_min.setToolTip(
+            "Minimum HSV saturation for glow-colored ring pixels."
+        )
+        self._spin_glow_confirm_frames = QSpinBox()
+        self._spin_glow_confirm_frames.setRange(1, 8)
+        self._spin_glow_confirm_frames.setPrefix("N ")
+        self._spin_glow_confirm_frames.setMaximumWidth(64)
+        self._spin_glow_confirm_frames.setToolTip(
+            "Consecutive glow frames required before glow is considered confirmed."
+        )
+        glow_row.addWidget(self._spin_glow_ring_thickness)
+        glow_row.addWidget(self._spin_glow_value_delta)
+        glow_row.addWidget(self._spin_glow_saturation_min)
+        glow_row.addWidget(self._spin_glow_confirm_frames)
+        glow_row.addStretch()
+        fl.addRow(_row_label("Glow:"), glow_row)
+        self._slider_glow_ring_fraction = QSlider(Qt.Orientation.Horizontal)
+        self._slider_glow_ring_fraction.setRange(5, 60)
+        self._slider_glow_ring_fraction.setSingleStep(1)
+        self._slider_glow_ring_fraction.setToolTip(
+            "Minimum fraction of ring pixels that must meet glow criteria."
+        )
+        self._glow_ring_fraction_label = QLabel("0.18")
+        self._glow_ring_fraction_label.setMinimumWidth(32)
+        self._glow_ring_fraction_label.setStyleSheet("font-family: monospace; font-size: 11px;")
+        glow_frac_help = QLabel("(?)")
+        glow_frac_help.setToolTip(
+            "Minimum fraction of ring pixels matching glow color/brightness criteria."
+        )
+        glow_frac_help.setStyleSheet("color: #666; font-size: 11px;")
+        glow_frac_row = QHBoxLayout()
+        glow_frac_row.addWidget(self._slider_glow_ring_fraction)
+        glow_frac_row.addWidget(self._glow_ring_fraction_label)
+        glow_frac_row.addWidget(glow_frac_help)
+        fl.addRow(_row_label("Glow frac:"), glow_frac_row)
         self._check_cast_detection = QCheckBox("Enable cast/channel detection")
         fl.addRow("", self._check_cast_detection)
         cast_band_row = QHBoxLayout()
@@ -440,6 +515,13 @@ class SettingsDialog(QDialog):
         self._spin_padding.valueChanged.connect(self._on_slot_layout_changed)
         self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
+        self._slider_change_pixel_fraction.valueChanged.connect(self._on_detection_changed)
+        self._check_glow_enabled.toggled.connect(self._on_detection_changed)
+        self._spin_glow_ring_thickness.valueChanged.connect(self._on_detection_changed)
+        self._spin_glow_value_delta.valueChanged.connect(self._on_detection_changed)
+        self._spin_glow_saturation_min.valueChanged.connect(self._on_detection_changed)
+        self._spin_glow_confirm_frames.valueChanged.connect(self._on_detection_changed)
+        self._slider_glow_ring_fraction.valueChanged.connect(self._on_detection_changed)
         self._check_cast_detection.toggled.connect(self._on_detection_changed)
         self._spin_cast_min_fraction.valueChanged.connect(self._on_detection_changed)
         self._spin_cast_max_fraction.valueChanged.connect(self._on_detection_changed)
@@ -512,9 +594,31 @@ class SettingsDialog(QDialog):
         self._spin_padding.blockSignals(False)
         self._spin_brightness_drop.blockSignals(True)
         self._slider_pixel_fraction.blockSignals(True)
+        self._slider_change_pixel_fraction.blockSignals(True)
+        self._check_glow_enabled.blockSignals(True)
+        self._spin_glow_ring_thickness.blockSignals(True)
+        self._spin_glow_value_delta.blockSignals(True)
+        self._spin_glow_saturation_min.blockSignals(True)
+        self._spin_glow_confirm_frames.blockSignals(True)
+        self._slider_glow_ring_fraction.blockSignals(True)
         self._spin_brightness_drop.setValue(self._config.brightness_drop_threshold)
         self._slider_pixel_fraction.setValue(int(self._config.cooldown_pixel_fraction * 100))
         self._pixel_fraction_label.setText(f"{self._config.cooldown_pixel_fraction:.2f}")
+        self._slider_change_pixel_fraction.setValue(
+            int(round(getattr(self._config, "cooldown_change_pixel_fraction", self._config.cooldown_pixel_fraction) * 100))
+        )
+        self._change_pixel_fraction_label.setText(
+            f"{getattr(self._config, 'cooldown_change_pixel_fraction', self._config.cooldown_pixel_fraction):.2f}"
+        )
+        self._check_glow_enabled.setChecked(bool(getattr(self._config, "glow_enabled", True)))
+        self._spin_glow_ring_thickness.setValue(int(getattr(self._config, "glow_ring_thickness_px", 4)))
+        self._spin_glow_value_delta.setValue(int(getattr(self._config, "glow_value_delta", 35)))
+        self._spin_glow_saturation_min.setValue(int(getattr(self._config, "glow_saturation_min", 80)))
+        self._spin_glow_confirm_frames.setValue(int(getattr(self._config, "glow_confirm_frames", 2)))
+        self._slider_glow_ring_fraction.setValue(
+            int(round(getattr(self._config, "glow_ring_fraction", 0.18) * 100))
+        )
+        self._glow_ring_fraction_label.setText(f"{getattr(self._config, 'glow_ring_fraction', 0.18):.2f}")
         self._check_cast_detection.blockSignals(True)
         self._spin_cast_min_fraction.blockSignals(True)
         self._spin_cast_max_fraction.blockSignals(True)
@@ -556,6 +660,13 @@ class SettingsDialog(QDialog):
         )
         self._spin_brightness_drop.blockSignals(False)
         self._slider_pixel_fraction.blockSignals(False)
+        self._slider_change_pixel_fraction.blockSignals(False)
+        self._check_glow_enabled.blockSignals(False)
+        self._spin_glow_ring_thickness.blockSignals(False)
+        self._spin_glow_value_delta.blockSignals(False)
+        self._spin_glow_saturation_min.blockSignals(False)
+        self._spin_glow_confirm_frames.blockSignals(False)
+        self._slider_glow_ring_fraction.blockSignals(False)
         self._check_cast_detection.blockSignals(False)
         self._spin_cast_min_fraction.blockSignals(False)
         self._spin_cast_max_fraction.blockSignals(False)
@@ -822,6 +933,15 @@ class SettingsDialog(QDialog):
         self._config.brightness_drop_threshold = self._spin_brightness_drop.value()
         self._config.cooldown_pixel_fraction = self._slider_pixel_fraction.value() / 100.0
         self._pixel_fraction_label.setText(f"{self._config.cooldown_pixel_fraction:.2f}")
+        self._config.cooldown_change_pixel_fraction = self._slider_change_pixel_fraction.value() / 100.0
+        self._change_pixel_fraction_label.setText(f"{self._config.cooldown_change_pixel_fraction:.2f}")
+        self._config.glow_enabled = self._check_glow_enabled.isChecked()
+        self._config.glow_ring_thickness_px = self._spin_glow_ring_thickness.value()
+        self._config.glow_value_delta = self._spin_glow_value_delta.value()
+        self._config.glow_saturation_min = self._spin_glow_saturation_min.value()
+        self._config.glow_confirm_frames = self._spin_glow_confirm_frames.value()
+        self._config.glow_ring_fraction = self._slider_glow_ring_fraction.value() / 100.0
+        self._glow_ring_fraction_label.setText(f"{self._config.glow_ring_fraction:.2f}")
         cast_min = self._spin_cast_min_fraction.value() / 100.0
         cast_max = self._spin_cast_max_fraction.value() / 100.0
         if cast_min >= cast_max:

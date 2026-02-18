@@ -38,6 +38,7 @@ class _SlotRuntime:
     last_cast_start_at: Optional[float] = None
     last_cast_success_at: Optional[float] = None
     last_darkened_fraction: float = 0.0
+    glow_candidate_frames: int = 0
 
 
 class SlotAnalyzer:
@@ -70,6 +71,7 @@ class SlotAnalyzer:
         self._cast_gate_active: bool = False
         self._frame_action_origin_x: int = 0
         self._frame_action_origin_y: int = 0
+        self._ring_mask_cache: dict[tuple[int, int, int], np.ndarray] = {}
         self._recompute_slot_layout()
 
     def _recompute_slot_layout(self) -> None:
@@ -117,6 +119,8 @@ class SlotAnalyzer:
         Applies slot_padding as an inset on all four sides so the analyzed
         region excludes gap pixels and icon borders.
         """
+        if frame is None or frame.size == 0:
+            return np.empty((0, 0, 3), dtype=np.uint8)
         pad = self._config.slot_padding
         x1 = self._frame_action_origin_x + slot.x_offset + pad
         y1 = self._frame_action_origin_y + slot.y_offset + pad
@@ -136,7 +140,43 @@ class SlotAnalyzer:
 
     def _get_brightness_channel(self, bgr_crop: np.ndarray) -> np.ndarray:
         """Convert BGR crop to grayscale (0-255)."""
+        if bgr_crop is None or bgr_crop.size == 0:
+            return np.empty((0, 0), dtype=np.uint8)
         return cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2GRAY)
+
+    def _ring_mask(self, h: int, w: int, thickness: int) -> np.ndarray:
+        key = (h, w, thickness)
+        cached = self._ring_mask_cache.get(key)
+        if cached is not None:
+            return cached
+        t = max(1, min(thickness, max(1, min(h, w) // 3)))
+        mask = np.ones((h, w), dtype=bool)
+        if h > 2 * t and w > 2 * t:
+            mask[t : h - t, t : w - t] = False
+        self._ring_mask_cache[key] = mask
+        return mask
+
+    def _glow_signal(self, slot_img: np.ndarray, baseline_bright: np.ndarray) -> tuple[bool, float]:
+        if not bool(getattr(self._config, "glow_enabled", True)):
+            return False, 0.0
+        h, w = baseline_bright.shape
+        if slot_img.shape[0] != h or slot_img.shape[1] != w:
+            return False, 0.0
+        ring_thickness = int(getattr(self._config, "glow_ring_thickness_px", 4) or 4)
+        ring = self._ring_mask(h, w, ring_thickness)
+        if not np.any(ring):
+            return False, 0.0
+
+        hsv = cv2.cvtColor(slot_img, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1].astype(np.int16)
+        val = hsv[:, :, 2].astype(np.int16)
+        base = baseline_bright.astype(np.int16)
+        value_delta = int(getattr(self._config, "glow_value_delta", 35) or 35)
+        sat_min = int(getattr(self._config, "glow_saturation_min", 80) or 80)
+        cond = (val >= (base + value_delta)) & (sat >= sat_min)
+        glow_fraction = float(np.mean(cond[ring])) if np.any(ring) else 0.0
+        glow_frac_thresh = float(getattr(self._config, "glow_ring_fraction", 0.18) or 0.18)
+        return glow_fraction >= glow_frac_thresh, glow_fraction
 
     def calibrate_baselines(self, frame: np.ndarray) -> None:
         """Capture current frame as the 'ready' baseline for all slots.
@@ -148,7 +188,11 @@ class SlotAnalyzer:
         self._frame_action_origin_y = 0
         for slot_cfg in self._slot_configs:
             slot_img = self.crop_slot(frame, slot_cfg)
-            self._baselines[slot_cfg.index] = self._get_brightness_channel(slot_img).copy()
+            gray = self._get_brightness_channel(slot_img)
+            if gray.size == 0:
+                logger.warning(f"Skipping baseline for slot {slot_cfg.index}: empty crop")
+                continue
+            self._baselines[slot_cfg.index] = gray.copy()
             self._runtime[slot_cfg.index] = _SlotRuntime()
         logger.info(f"Calibrated brightness baselines for {len(self._baselines)} slots")
 
@@ -161,7 +205,11 @@ class SlotAnalyzer:
         self._frame_action_origin_y = 0
         slot_cfg = self._slot_configs[slot_index]
         slot_img = self.crop_slot(frame, slot_cfg)
-        self._baselines[slot_index] = self._get_brightness_channel(slot_img).copy()
+        gray = self._get_brightness_channel(slot_img)
+        if gray.size == 0:
+            logger.warning(f"calibrate_single_slot: empty crop for slot {slot_index}")
+            return
+        self._baselines[slot_index] = gray.copy()
         self._runtime[slot_index] = _SlotRuntime()
         logger.info(f"Calibrated baseline for slot {slot_index}")
 
@@ -500,6 +548,10 @@ class SlotAnalyzer:
 
         thresh = self._config.brightness_drop_threshold
         frac_thresh = self._config.cooldown_pixel_fraction
+        change_frac_thresh = float(
+            getattr(self._config, "cooldown_change_pixel_fraction", frac_thresh) or frac_thresh
+        )
+        glow_confirm_frames = max(1, int(getattr(self._config, "glow_confirm_frames", 2) or 2))
         cast_bar_active = self._cast_bar_active(
             frame,
             self._frame_action_origin_x,
@@ -517,8 +569,15 @@ class SlotAnalyzer:
             slot_img = self.crop_slot(frame, slot_cfg)
             current_bright = self._get_brightness_channel(slot_img)
             baseline_bright = self._baselines.get(slot_cfg.index)
+            glow_ready = False
+            glow_candidate = False
+            glow_fraction = 0.0
 
-            if baseline_bright is None or baseline_bright.shape != current_bright.shape:
+            if (
+                current_bright.size == 0
+                or baseline_bright is None
+                or baseline_bright.shape != current_bright.shape
+            ):
                 state = SlotState.UNKNOWN
                 darkened_fraction = 0.0
                 cast_progress = None
@@ -531,7 +590,17 @@ class SlotAnalyzer:
                 darkened_count = np.sum(drop > thresh)
                 total = current_bright.size
                 darkened_fraction = darkened_count / total if total else 0.0
-                raw_cooldown = darkened_fraction >= frac_thresh
+                # Also treat large absolute change from baseline as cooldown/not-ready
+                # so bright buff/debuff duration sweeps don't look ready.
+                abs_delta = np.abs(drop)
+                changed_count = np.sum(abs_delta > thresh)
+                changed_fraction = changed_count / total if total else 0.0
+                raw_dark_cooldown = darkened_fraction >= frac_thresh
+                raw_changed_cooldown = changed_fraction >= change_frac_thresh
+                raw_cooldown = (
+                    raw_dark_cooldown
+                    or raw_changed_cooldown
+                )
                 (
                     state,
                     cast_progress,
@@ -545,6 +614,18 @@ class SlotAnalyzer:
                     now,
                     cast_gate_active=cast_gate_active,
                 )
+                runtime = self._runtime.setdefault(slot_cfg.index, _SlotRuntime())
+                glow_candidate, glow_fraction = self._glow_signal(slot_img, baseline_bright)
+                if glow_candidate:
+                    runtime.glow_candidate_frames += 1
+                else:
+                    runtime.glow_candidate_frames = 0
+                glow_ready = runtime.glow_candidate_frames >= glow_confirm_frames
+                # Glow is a strong "usable now" cue for many MMOs. Only let it
+                # override cooldown when cooldown came from generic change-delta
+                # and not from strong darkening.
+                if glow_ready and state == SlotState.ON_COOLDOWN and (not raw_dark_cooldown):
+                    state = SlotState.READY
                 if cast_bar_active and bool(
                     getattr(self._config, "lock_ready_while_cast_bar_active", False)
                 ):
@@ -564,6 +645,9 @@ class SlotAnalyzer:
                     cast_ends_at=cast_ends_at,
                     last_cast_start_at=last_cast_start_at,
                     last_cast_success_at=last_cast_success_at,
+                    glow_candidate=bool(glow_candidate),
+                    glow_fraction=float(glow_fraction),
+                    glow_ready=bool(glow_ready),
                     timestamp=now,
                 )
             )
