@@ -310,6 +310,7 @@ def main() -> None:
     def on_config_changed(new_config: AppConfig) -> None:
         nonlocal config
         config = new_config
+        window.set_config(new_config)
         worker.update_config(new_config)
         key_sender.update_config(new_config)
         overlay.update_cast_bar_region(getattr(new_config, "cast_bar_region", {}))

@@ -483,12 +483,14 @@ class MainWindow(QMainWindow):
 
         # Scroll area: only Last Action + Next Intention
         self._left_panel = _LeftPanel(parent=central)
-        self._left_panel.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
-        )
         left_layout = QVBoxLayout(self._left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(14)
+        # Min height = last_action (132) + spacing (14) + next (104) so scroll bar appears before overlap
+        self._left_panel.setMinimumHeight(132 + 14 + 104)
+        self._left_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
         last_action_frame = QFrame()
         last_action_frame.setObjectName("sectionFrameDark")
         last_action_frame.setStyleSheet(
@@ -511,7 +513,8 @@ class MainWindow(QMainWindow):
         self._last_action_history.setStyleSheet("background: transparent;")
         self._last_action_history.setMinimumHeight(80)
         last_action_inner.addWidget(self._last_action_history)
-        last_action_frame.setMinimumHeight(140)
+        # Min height so panel doesn't collapse; includes title + history + inner padding (8*2)
+        last_action_frame.setMinimumHeight(28 + 80 + 24)
         last_action_frame.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
         )
@@ -535,12 +538,13 @@ class MainWindow(QMainWindow):
             "—", "no action", "", "", key_color="#555", parent=next_frame
         )
         next_inner.addWidget(self._next_intention_row)
-        next_frame.setMinimumHeight(28 + 16 + 52)
+        # Min height: title + row + inner padding (8*2) so panel doesn't collapse
+        next_frame.setMinimumHeight(28 + 52 + 24)
         next_frame.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
         )
         left_layout.addWidget(next_frame)
-        left_layout.addStretch(1)
+        # No stretch: keep content height fixed so scroll bar appears when viewport is smaller
         # When no capture: show centered play button; when capture running: show Last Action + Next Intention
         scroll_content = QStackedWidget(central)
         scroll_content.setMinimumHeight(220)
@@ -837,6 +841,10 @@ class MainWindow(QMainWindow):
                 self._queue_listener.clear_queue()
         self._update_automation_button_text()
         self.config_changed.emit(self._config)
+
+    def set_config(self, config: AppConfig) -> None:
+        """Update the config reference (e.g. after import in settings). Keeps window in sync with worker/analyzer."""
+        self._config = config
 
     def set_key_sender(self, key_sender: Optional["KeySender"]) -> None:
         self._key_sender = key_sender
