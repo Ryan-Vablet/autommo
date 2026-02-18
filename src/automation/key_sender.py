@@ -122,10 +122,17 @@ class KeySender:
                     }
 
         slots_by_index = {s.index: s for s in state.slots}
-        # Queued key fires only when at least one priority slot is READY (GCD over; game accepts input).
+        # Queued key fires only when at least one slot-type priority item is READY
+        # (used as a practical "GCD over" signal).
         any_priority_ready = any(
-            slots_by_index.get(i) and slots_by_index[i].state == SlotState.READY
-            for i in priority_items
+            (
+                isinstance(item, dict)
+                and str(item.get("type", "") or "").strip().lower() == "slot"
+                and isinstance(item.get("slot_index"), int)
+                and (slots_by_index.get(item["slot_index"]) is not None)
+                and slots_by_index[item["slot_index"]].state == SlotState.READY
+            )
+            for item in (priority_items or [])
         )
 
         if queued_override:

@@ -1043,6 +1043,20 @@ class MainWindow(QMainWindow):
                 return slot_index, slot.get("cast_ends_at")
         return None, None
 
+    def _next_ready_priority_slot(self, states: list[dict]) -> Optional[int]:
+        """Return first READY slot index from active priority items, or None."""
+        by_index = {s["index"]: s for s in states}
+        for item in self._active_priority_items():
+            if str(item.get("type", "") or "").strip().lower() != "slot":
+                continue
+            slot_index = item.get("slot_index")
+            if not isinstance(slot_index, int):
+                continue
+            slot = by_index.get(slot_index)
+            if slot and slot.get("state") == "ready":
+                return slot_index
+        return None
+
     def _show_slot_menu(self, slot_index: int) -> None:
         """Show context menu: Bind Key, Calibrate This Slot, Rename (identify skill)."""
         if slot_index < 0 or slot_index >= len(self._slot_buttons):
@@ -1313,7 +1327,6 @@ class MainWindow(QMainWindow):
 
     def update_slot_states(self, states: list[dict]) -> None:
         """Update the slot state indicators (QPushButtons with keybind + state color).
-
         Args:
             states: List of dicts with keys: index, state, keybind, cooldown_remaining
         """
@@ -1321,11 +1334,9 @@ class MainWindow(QMainWindow):
         # rebuilding the slot row and causing visible geometry churn.
         if not states:
             return
-
         # Pad keybinds so we can index by slot
         while len(self._config.keybinds) < len(states):
             self._config.keybinds.append("")
-
         if len(self._slot_buttons) != len(states):
             for b in self._slot_buttons:
                 b.deleteLater()
@@ -1339,7 +1350,6 @@ class MainWindow(QMainWindow):
                 btn.context_menu_requested.connect(self._show_slot_menu)
                 self._slot_buttons.append(btn)
             self._slot_states_row.set_buttons(self._slot_buttons)
-
         for btn, s in zip(self._slot_buttons, states):
             keybind = s.get("keybind")
             if keybind is None and s["index"] < len(self._config.keybinds):
@@ -1350,7 +1360,6 @@ class MainWindow(QMainWindow):
             self._apply_slot_button_style(
                 btn, state, keybind, cd, slot_index=s["index"]
             )
-
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_manual_actions(
             self._active_manual_actions()
@@ -1358,20 +1367,6 @@ class MainWindow(QMainWindow):
         self._priority_panel.priority_list.update_states(states)
         if self._queued_override:
             keybind = (self._queued_override.get("key") or "?").strip() or "?"
-
-        casting_slot, cast_ends_at = self._next_casting_priority_slot(states)
-        if casting_slot is not None:
-            self.set_next_intention_casting_wait(casting_slot, cast_ends_at)
-            return
-
-        next_slot = self._next_ready_priority_slot(states)
-        if next_slot is not None:
-            keybind = (
-                self._config.keybinds[next_slot]
-                if next_slot < len(self._config.keybinds)
-                else "?"
-            )
-            keybind = keybind or "?"
             names = getattr(self._config, "slot_display_names", [])
             slot_name = "Unidentified"
             if self._queued_override.get("source") == "tracked":
@@ -1390,34 +1385,35 @@ class MainWindow(QMainWindow):
                 else "queued"
             )
             self._next_intention_row.set_content(keybind, slot_name, suffix, KEY_CYAN)
-        else:
-            next_slot = self._next_ready_priority_slot(states)
-            if next_slot is not None:
-                keybind = (
-                    self._config.keybinds[next_slot]
-                    if next_slot < len(self._config.keybinds)
-                    else "?"
-                )
-                keybind = keybind or "?"
-                names = getattr(self._config, "slot_display_names", [])
-                slot_name = "Unidentified"
-                if next_slot < len(names) and (names[next_slot] or "").strip():
-                    slot_name = (names[next_slot] or "").strip()
-                if not self._config.automation_enabled:
-                    suffix = "ready (paused)"
-                    color = KEY_YELLOW
-                elif (
-                    self._key_sender is None
-                    or not self._key_sender.is_target_window_active()
-                ):
-                    suffix = "ready (window)"
-                    color = KEY_YELLOW
-                else:
-                    suffix = "ready — next"
-                    color = KEY_GREEN
-                self._next_intention_row.set_content(keybind, slot_name, suffix, color)
+            return
+        casting_slot, cast_ends_at = self._next_casting_priority_slot(states)
+        if casting_slot is not None:
+            self.set_next_intention_casting_wait(casting_slot, cast_ends_at)
+            return
+        next_slot = self._next_ready_priority_slot(states)
+        if next_slot is not None:
+            keybind = (
+                self._config.keybinds[next_slot]
+                if next_slot < len(self._config.keybinds)
+                else "?"
+            )
+            keybind = keybind or "?"
+            names = getattr(self._config, "slot_display_names", [])
+            slot_name = "Unidentified"
+            if next_slot < len(names) and (names[next_slot] or "").strip():
+                slot_name = (names[next_slot] or "").strip()
+            if not self._config.automation_enabled:
+                suffix = "ready (paused)"
+                color = KEY_YELLOW
+            elif self._key_sender is None or not self._key_sender.is_target_window_active():
+                suffix = "ready (window)"
+                color = KEY_YELLOW
             else:
-                self._next_intention_row.set_content("—", "no action", "", "#555")
+                suffix = "ready - next"
+                color = KEY_GREEN
+            self._next_intention_row.set_content(keybind, slot_name, suffix, color)
+            return
+        self._next_intention_row.set_content("-", "no action", "", "#555")
 
     def set_before_save_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Set a callback run before writing config (e.g. to sync baselines from analyzer)."""
@@ -1503,3 +1499,4 @@ class MainWindow(QMainWindow):
     def _on_settings_clicked(self) -> None:
         """No-op; main.py connects _btn_settings to settings_dialog.show_or_raise."""
         pass
+
