@@ -52,6 +52,28 @@ def decode_baselines(data: list[dict]) -> dict[int, np.ndarray]:
     return result
 
 
+def encode_baselines_by_form(baselines_by_form: dict[str, dict[int, np.ndarray]]) -> dict:
+    encoded: dict[str, list[dict]] = {}
+    for form_id, baselines in dict(baselines_by_form or {}).items():
+        fid = str(form_id or "").strip().lower()
+        if not fid:
+            continue
+        encoded[fid] = encode_baselines(baselines)
+    return encoded
+
+
+def decode_baselines_by_form(data: object) -> dict[str, dict[int, np.ndarray]]:
+    if not isinstance(data, dict):
+        return {}
+    decoded: dict[str, dict[int, np.ndarray]] = {}
+    for form_id, encoded in data.items():
+        fid = str(form_id or "").strip().lower()
+        if not fid or not isinstance(encoded, list):
+            continue
+        decoded[fid] = decode_baselines(encoded)
+    return decoded
+
+
 def encode_gray_template(gray: np.ndarray) -> dict:
     return {
         "shape": [int(gray.shape[0]), int(gray.shape[1])],
@@ -78,6 +100,7 @@ class CaptureWorker(QThread):
 
     frame_captured = pyqtSignal(np.ndarray)  # Raw frame for preview
     state_updated = pyqtSignal(list)  # List of slot state dicts
+    form_state_updated = pyqtSignal(object)  # Dict with active_form_id and settle state
     buff_state_updated = pyqtSignal(object)  # Dict of buff ROI states
     cast_bar_debug = pyqtSignal(object)  # Live cast-bar ROI motion/status info
     key_action = pyqtSignal(
@@ -191,10 +214,13 @@ class CaptureWorker(QThread):
                     self.frame_captured.emit(action_frame)
 
                     state = self._analyzer.analyze_frame(frame, action_origin=action_origin)
+                    form_state = self._analyzer.form_state()
+                    self._config.active_form_id = str(form_state.get("active_form_id", "normal") or "normal")
                     slot_dicts = [
                         {
                             "index": s.index,
                             "state": s.state.value,
+                            "active_form_id": self._config.active_form_id,
                             "keybind": (
                                 self._config.keybinds[s.index]
                                 if s.index < len(self._config.keybinds)
@@ -223,6 +249,7 @@ class CaptureWorker(QThread):
                     # Snapshot queue at start of tick so priority never replaces it this tick.
                     queued = self._queue_listener.get_queue() if self._queue_listener else None
                     self.state_updated.emit(slot_dicts)
+                    self.form_state_updated.emit(form_state)
                     buff_states = self._analyzer.buff_states()
                     self.buff_state_updated.emit(buff_states)
                     self.cast_bar_debug.emit(self._analyzer.cast_bar_debug())
@@ -293,19 +320,24 @@ def main() -> None:
 
     # --- Initialize components ---
     analyzer = SlotAnalyzer(config)
-    if config.slot_baselines:
-        try:
+    try:
+        decoded_by_form = decode_baselines_by_form(getattr(config, "slot_baselines_by_form", {}))
+        if decoded_by_form:
+            analyzer.set_baselines_by_form(decoded_by_form)
+        elif config.slot_baselines:
             decoded = decode_baselines(config.slot_baselines)
             if decoded:
                 analyzer.set_baselines(decoded)
-        except Exception as e:
-            logger.warning(f"Could not load saved baselines: {e}")
+    except Exception as e:
+        logger.warning(f"Could not load saved baselines: {e}")
 
     # --- Main window ---
     window = MainWindow(config)
 
     def sync_baselines_to_config() -> None:
-        config.slot_baselines = encode_baselines(analyzer.get_baselines())
+        baselines_by_form = analyzer.get_baselines_by_form()
+        config.slot_baselines_by_form = encode_baselines_by_form(baselines_by_form)
+        config.slot_baselines = config.slot_baselines_by_form.get("normal", [])
 
     window.set_before_save_callback(sync_baselines_to_config)
 
@@ -387,6 +419,7 @@ def main() -> None:
     worker.frame_captured.connect(window.update_preview)
     worker.state_updated.connect(window.update_slot_states)
     worker.state_updated.connect(overlay.update_slot_states)
+    worker.form_state_updated.connect(window.update_form_state)
     worker.buff_state_updated.connect(window.update_buff_states)
     worker.buff_state_updated.connect(overlay.update_buff_states)
     worker.cast_bar_debug.connect(window.update_cast_bar_debug)
@@ -501,13 +534,15 @@ def main() -> None:
 
     # Calibrate baselines: grab one frame on main thread with short-lived mss
     def revert_calibrate_button(btn):
-        btn.setText("Calibrate All Baselines")
+        active_form = str(getattr(config, "active_form_id", "normal") or "normal").strip().lower() or "normal"
+        btn.setText(f"Calibrate Baselines ({active_form})")
         btn.setStyleSheet("")
 
     def calibrate_baselines(button_to_update):
         btn = button_to_update
+        target_form = str(getattr(config, "active_form_id", "normal") or "normal").strip().lower() or "normal"
         baselines = analyzer.get_baselines()
-        if baselines:
+        if target_form == "normal" and baselines:
             reply = QMessageBox.question(
                 window,
                 "Recalibrate all slots?",
@@ -522,11 +557,11 @@ def main() -> None:
             cap.start()
             frame = cap.grab_region(config.bounding_box)
             cap.stop()
-            analyzer.calibrate_baselines(frame)
-            logger.info("Baselines calibrated from current frame")
+            analyzer.calibrate_baselines(frame, form_id=target_form)
+            logger.info("Baselines calibrated from current frame (form=%s)", target_form)
             sync_baselines_to_config()  # Update config in memory so baselines are not lost when switching windows
             window.clear_overwritten_baseline_slots()
-            btn.setText("Calibrated ✓")
+            btn.setText(f"Calibrated {target_form}")
             btn.setStyleSheet("")
             QTimer.singleShot(2000, lambda: revert_calibrate_button(btn))
         except Exception as e:
@@ -604,13 +639,18 @@ def main() -> None:
 
     def calibrate_single_slot(slot_index: int) -> None:
         try:
+            target_form = str(getattr(config, "active_form_id", "normal") or "normal").strip().lower() or "normal"
             cap = ScreenCapture(monitor_index=config.monitor_index)
             cap.start()
             frame = cap.grab_region(config.bounding_box)
             cap.stop()
-            analyzer.calibrate_single_slot(frame, slot_index)
+            analyzer.calibrate_single_slot(
+                frame,
+                slot_index,
+                form_id=target_form,
+            )
             window.mark_slot_recalibrated(slot_index)
-            window.show_status_message(f"Slot {slot_index + 1} calibrated ✓", 2000)
+            window.show_status_message(f"Slot {slot_index + 1} calibrated ({target_form})", 2000)
         except Exception as e:
             logger.error(f"Per-slot calibration failed: {e}")
             window.show_status_message(f"Calibration failed: {e}", 2000)
@@ -633,3 +673,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -171,3 +171,17 @@ Behavior in v1:
 - For actions using `buff_missing`, readiness requires the calibrated present template to be absent and the slot icon to be ready.
 - With `Activation: DoT refresh`, buff-gated slot items must still pass buff gate; confirmed red glow only overrides slot-icon readiness.
 - With `Activation: Require glow`, buff-gated slot items must still pass buff gate, and slot-icon readiness plus confirmed glow are both required.
+
+## Forms (Transform/Stance)
+
+- Add forms in `Settings -> Detection -> Forms`.
+- Optional form detector:
+  - Set `Form detect` to `Buff ROI`
+  - Select a buff ROI
+  - Map present/absent to form ids
+  - Tune confirm frames and settle ms
+- Calibrate baselines per active form:
+  - Select active form in Detection settings
+  - Use `Calibrate Baselines (<form>)`
+- In Priority list, right-click an item and set `Required Form` (`Any` or specific form).
+- Advanced cooldown memory sharing can be set with `detection.cooldown_group_by_slot`.

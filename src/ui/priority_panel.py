@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 from src.automation.priority_rules import (
     manual_item_is_eligible,
     normalize_activation_rule,
+    normalize_required_form,
     normalize_ready_source,
 )
 
@@ -92,7 +93,9 @@ class PriorityItemWidget(QFrame):
         activation_rule: str,
         ready_source: str,
         buff_roi_id: str,
+        required_form: str,
         buff_rois: list[dict],
+        forms: list[dict],
         rank: int,
         keybind: str,
         display_name: str,
@@ -106,7 +109,9 @@ class PriorityItemWidget(QFrame):
         self._activation_rule = normalize_activation_rule(activation_rule)
         self._ready_source = normalize_ready_source(ready_source, item_type)
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
+        self._required_form = normalize_required_form(required_form)
         self._buff_rois = [dict(r) for r in list(buff_rois or []) if isinstance(r, dict)]
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
         self._rank = rank
         self._keybind = (keybind or "?").strip()
         self._display_name = display_name or "Unidentified"
@@ -198,12 +203,29 @@ class PriorityItemWidget(QFrame):
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
         self._update_rule_label()
 
+    def set_required_form(self, required_form: str) -> None:
+        self._required_form = normalize_required_form(required_form)
+        self._update_rule_label()
+
+    def set_forms(self, forms: list[dict]) -> None:
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
+        self._update_rule_label()
+
     def _buff_name(self, buff_id: str) -> str:
         bid = str(buff_id or "").strip().lower()
         for b in self._buff_rois:
             if str(b.get("id", "") or "").strip().lower() == bid:
                 return str(b.get("name", "") or "").strip() or bid
         return bid
+
+    def _form_name(self, form_id: str) -> str:
+        fid = str(form_id or "").strip().lower()
+        if not fid:
+            return "Any"
+        for f in self._forms:
+            if str(f.get("id", "") or "").strip().lower() == fid:
+                return str(f.get("name", "") or "").strip() or fid
+        return fid
 
     def _update_rule_label(self) -> None:
         tokens: list[str] = []
@@ -215,6 +237,8 @@ class PriorityItemWidget(QFrame):
             tokens.append(f"B+:{self._buff_name(self._buff_roi_id)}")
         elif self._ready_source == "buff_missing":
             tokens.append(f"B-:{self._buff_name(self._buff_roi_id)}")
+        if self._required_form:
+            tokens.append(f"F:{self._form_name(self._required_form)}")
         self._rule_label.setText(" ".join(tokens))
 
     def set_last_fired_timestamp(self, timestamp: Optional[float]) -> None:
@@ -332,6 +356,7 @@ class PriorityItemWidget(QFrame):
         ready_always_action = None
         slot_ready_action = None
         ready_actions: dict[object, tuple[str, str]] = {}
+        form_actions: dict[object, str] = {}
         if self._item_type == "manual" and self._action_id:
             rename_action = menu.addAction("Rename...")
             rebind_action = menu.addAction("Rebind...")
@@ -357,6 +382,21 @@ class PriorityItemWidget(QFrame):
                     self._ready_source == "buff_missing" and self._buff_roi_id == buff_id
                 )
                 ready_actions[a_missing] = ("buff_missing", buff_id)
+            menu.addSeparator()
+            form_menu = menu.addMenu("Required Form")
+            a_any = form_menu.addAction("Any")
+            a_any.setCheckable(True)
+            a_any.setChecked(not self._required_form)
+            form_actions[a_any] = ""
+            for form in self._forms:
+                form_id = str(form.get("id", "") or "").strip().lower()
+                if not form_id:
+                    continue
+                form_name = str(form.get("name", "") or "").strip() or form_id
+                act = form_menu.addAction(form_name)
+                act.setCheckable(True)
+                act.setChecked(self._required_form == form_id)
+                form_actions[act] = form_id
             menu.addSeparator()
             remove_action = menu.addAction("Remove")
         elif self._item_type == "slot":
@@ -398,6 +438,21 @@ class PriorityItemWidget(QFrame):
                     self._ready_source == "buff_missing" and self._buff_roi_id == buff_id
                 )
                 ready_actions[a_missing] = ("buff_missing", buff_id)
+            menu.addSeparator()
+            form_menu = menu.addMenu("Required Form")
+            a_any = form_menu.addAction("Any")
+            a_any.setCheckable(True)
+            a_any.setChecked(not self._required_form)
+            form_actions[a_any] = ""
+            for form in self._forms:
+                form_id = str(form.get("id", "") or "").strip().lower()
+                if not form_id:
+                    continue
+                form_name = str(form.get("name", "") or "").strip() or form_id
+                act = form_menu.addAction(form_name)
+                act.setCheckable(True)
+                act.setChecked(self._required_form == form_id)
+                form_actions[act] = form_id
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
@@ -428,6 +483,8 @@ class PriorityItemWidget(QFrame):
         elif chosen in ready_actions:
             source, buff_id = ready_actions[chosen]
             parent._on_item_ready_source_changed(self._item_key, source, buff_id)
+        elif chosen in form_actions:
+            parent._on_item_required_form_changed(self._item_key, form_actions[chosen])
 
 
 class _DropForwardScrollArea(QScrollArea):
@@ -480,7 +537,9 @@ class PriorityListWidget(QWidget):
         self._display_names: list[str] = []
         self._manual_actions: list[dict] = []
         self._buff_rois: list[dict] = []
+        self._forms: list[dict] = []
         self._buff_states: dict[str, dict] = {}
+        self._active_form_id: str = "normal"
         self._states_by_index: dict[int, tuple[str, Optional[float], Optional[float], Optional[float]]] = {}
         self._last_fired_by_keybind: dict[str, float] = {}
         self._time_since_timer = QTimer(self)
@@ -532,6 +591,10 @@ class PriorityListWidget(QWidget):
         self._buff_rois = [dict(r) for r in list(rois or []) if isinstance(r, dict)]
         self._rebuild_items()
 
+    def set_forms(self, forms: list[dict]) -> None:
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
+        self._rebuild_items()
+
     def set_buff_states(self, states: dict) -> None:
         self._buff_states = {
             str(k): dict(v) for k, v in dict(states or {}).items() if isinstance(v, dict)
@@ -557,6 +620,7 @@ class PriorityListWidget(QWidget):
                     out.get("ready_source"), "manual"
                 )
                 out["buff_roi_id"] = str(out.get("buff_roi_id", "") or "").strip().lower()
+            out["required_form"] = normalize_required_form(out.get("required_form"))
             normalized.append(out)
         self._items = normalized
         self._rebuild_items()
@@ -589,6 +653,9 @@ class PriorityListWidget(QWidget):
             )
             for s in states
         }
+        if states:
+            first = states[0]
+            self._active_form_id = str(first.get("active_form_id", self._active_form_id) or self._active_form_id).strip().lower() or "normal"
         self._states_by_index = by_index
         for w in self._item_widgets:
             if w.item_type == "slot" and isinstance(w.slot_index, int):
@@ -617,6 +684,7 @@ class PriorityListWidget(QWidget):
             activation_rule = normalize_activation_rule(item.get("activation_rule"))
             ready_source = normalize_ready_source(item.get("ready_source"), item_type)
             buff_roi_id = str(item.get("buff_roi_id", "") or "").strip().lower()
+            required_form = normalize_required_form(item.get("required_form"))
             if item_type == "slot" and isinstance(slot_index, int):
                 keybind = self._keybinds[slot_index] if slot_index < len(self._keybinds) else "?"
                 name = (
@@ -641,7 +709,9 @@ class PriorityListWidget(QWidget):
                 activation_rule,
                 ready_source,
                 buff_roi_id,
+                required_form,
                 self._buff_rois,
+                self._forms,
                 rank,
                 keybind or "?",
                 name,
@@ -649,6 +719,8 @@ class PriorityListWidget(QWidget):
             )
             w.set_activation_rule(activation_rule)
             w.set_ready_source(ready_source, buff_roi_id)
+            w.set_required_form(required_form)
+            w.set_forms(self._forms)
             if item_type == "slot" and isinstance(slot_index, int):
                 state, cd, cast_progress, cast_ends_at = self._states_by_index.get(
                     slot_index,
@@ -677,7 +749,11 @@ class PriorityListWidget(QWidget):
             if not isinstance(item, dict):
                 w.set_state("unknown", None, None, None)
                 continue
-            eligible = manual_item_is_eligible(item, buff_states=self._buff_states)
+            eligible = manual_item_is_eligible(
+                item,
+                buff_states=self._buff_states,
+                active_form_id=self._active_form_id,
+            )
             w.set_state("ready" if eligible else "on_cooldown", None, None, None)
 
     def _emit_items(self) -> None:
@@ -708,7 +784,12 @@ class PriorityListWidget(QWidget):
                 event.acceptProposedAction()
                 return
             self._items.append(
-                {"type": "slot", "slot_index": slot_index, "activation_rule": "always"}
+                {
+                    "type": "slot",
+                    "slot_index": slot_index,
+                    "activation_rule": "always",
+                    "required_form": "",
+                }
             )
             self._rebuild_items()
             self._emit_items()
@@ -769,6 +850,16 @@ class PriorityListWidget(QWidget):
             item_type = str(item.get("type", "") or "").strip().lower()
             item["ready_source"] = normalize_ready_source(ready_source, item_type)
             item["buff_roi_id"] = str(buff_roi_id or "").strip().lower()
+            self._rebuild_items()
+            self._emit_items()
+            return
+
+    def _on_item_required_form_changed(self, item_key: str, required_form: str) -> None:
+        normalized_form = normalize_required_form(required_form)
+        for item in self._items:
+            if self._item_key(item) != item_key:
+                continue
+            item["required_form"] = normalized_form
             self._rebuild_items()
             self._emit_items()
             return

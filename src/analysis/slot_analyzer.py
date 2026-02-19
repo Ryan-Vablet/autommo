@@ -5,6 +5,7 @@ then count the fraction of pixels where brightness has dropped by more than
 brightness_drop_threshold. If that fraction exceeds cooldown_pixel_fraction, mark
 ON_COOLDOWN. Per-pixel comparison catches partial GCD sweeps. Phase 2: OCR.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -53,15 +54,25 @@ class _BuffRuntime:
     red_glow_candidate_frames: int = 0
 
 
+@dataclass
+class _CooldownGroupRuntime:
+    was_cooldown: bool = False
+    cooldown_candidate_started_at: Optional[float] = None
+
+
 class SlotAnalyzer:
     """Analyzes a captured action bar image to determine per-slot cooldown state."""
 
     def __init__(self, config: AppConfig):
         self._config = config
         self._slot_configs: list[SlotConfig] = []
-        self._baselines: dict[int, np.ndarray] = {}  # slot_index -> baseline grayscale (2D uint8)
+        self._baselines: dict[int, np.ndarray] = (
+            {}
+        )  # Legacy mirror: "normal" slot baselines.
+        self._baselines_by_form: dict[str, dict[int, np.ndarray]] = {"normal": {}}
         self._ocr_engine: Optional[object] = None  # Lazy-loaded OCREngine
         self._runtime: dict[int, _SlotRuntime] = {}
+        self._cooldown_group_runtime: dict[str, _CooldownGroupRuntime] = {}
         self._analyze_frame_count = 0
         self._cast_bar_motion: deque[float] = deque(maxlen=8)
         self._cast_bar_prev_gray: Optional[np.ndarray] = None
@@ -71,7 +82,9 @@ class SlotAnalyzer:
         self._cast_bar_last_threshold: float = float(
             getattr(config, "cast_bar_activity_threshold", 12.0) or 12.0
         )
-        self._cast_bar_last_deactivate_threshold: float = self._cast_bar_last_threshold * 0.6
+        self._cast_bar_last_deactivate_threshold: float = (
+            self._cast_bar_last_threshold * 0.6
+        )
         self._cast_bar_last_active: bool = False
         self._cast_bar_last_status: str = "off"
         self._cast_bar_last_present: bool = False
@@ -95,6 +108,11 @@ class SlotAnalyzer:
         self._detection_region_overrides: dict[int, str] = dict(
             getattr(config, "detection_region_overrides", None) or {}
         )
+        self._active_form_id: str = "normal"
+        self._pending_form_id: str = "normal"
+        self._pending_form_frames: int = 0
+        self._form_last_changed_at: float = 0.0
+        self._form_settle_until: float = 0.0
         self._recompute_slot_layout()
 
     def _recompute_slot_layout(self) -> None:
@@ -120,7 +138,9 @@ class SlotAnalyzer:
             )
             self._runtime.setdefault(i, _SlotRuntime())
         self._runtime = {i: self._runtime.get(i, _SlotRuntime()) for i in range(count)}
-        logger.debug(f"Slot layout: {count} slots, each {slot_w}x{slot_h}px, gap={gap}px")
+        logger.debug(
+            f"Slot layout: {count} slots, each {slot_w}x{slot_h}px, gap={gap}px"
+        )
 
     def update_config(self, config: AppConfig) -> None:
         """Update config and recompute layout. Clears baselines if layout changed."""
@@ -141,10 +161,21 @@ class SlotAnalyzer:
         self._recompute_slot_layout()
         if layout_changed:
             self._baselines.clear()
+            self._baselines_by_form = {"normal": {}}
             self._runtime = {i: _SlotRuntime() for i in range(len(self._slot_configs))}
             logger.info("Slot layout changed; baselines cleared (recalibrate required)")
+        if not self._baselines_by_form.get("normal"):
+            self._baselines_by_form["normal"] = dict(self._baselines)
+        self._baselines = dict(self._baselines_by_form.get("normal", {}))
+        active_form = (
+            str(getattr(config, "active_form_id", "normal") or "normal").strip().lower()
+        )
+        self._active_form_id = active_form or "normal"
+        self._pending_form_id = self._active_form_id
+        self._pending_form_frames = 0
         self._buff_runtime = {}
         self._buff_states = {}
+        self._cooldown_group_runtime = {}
 
     def crop_slot(self, frame: np.ndarray, slot: SlotConfig) -> np.ndarray:
         """Extract a single slot's image from the action bar frame.
@@ -224,12 +255,17 @@ class SlotAnalyzer:
 
         yellow_fraction = float(np.mean(yellow_cond[ring])) if np.any(ring) else 0.0
         red_fraction = float(np.mean(red_cond[ring])) if np.any(ring) else 0.0
-        glow_frac_thresh = float(getattr(self._config, "glow_ring_fraction", 0.18) or 0.18)
-        ring_frac_overrides = getattr(self._config, "glow_ring_fraction_by_slot", {}) or {}
+        glow_frac_thresh = float(
+            getattr(self._config, "glow_ring_fraction", 0.18) or 0.18
+        )
+        ring_frac_overrides = (
+            getattr(self._config, "glow_ring_fraction_by_slot", {}) or {}
+        )
         if slot_index in ring_frac_overrides:
             glow_frac_thresh = float(ring_frac_overrides[slot_index])
         red_glow_frac_thresh = float(
-            getattr(self._config, "glow_red_ring_fraction", glow_frac_thresh) or glow_frac_thresh
+            getattr(self._config, "glow_red_ring_fraction", glow_frac_thresh)
+            or glow_frac_thresh
         )
         return (
             yellow_fraction >= glow_frac_thresh,
@@ -238,7 +274,117 @@ class SlotAnalyzer:
             red_fraction,
         )
 
-    def calibrate_baselines(self, frame: np.ndarray) -> None:
+    def _forms_from_config(self) -> set[str]:
+        raw_forms = list(getattr(self._config, "forms", []) or [])
+        form_ids = {
+            str(raw.get("id", "") or "").strip().lower()
+            for raw in raw_forms
+            if isinstance(raw, dict)
+        }
+        form_ids.discard("")
+        form_ids.add("normal")
+        return form_ids
+
+    def _set_active_form_id(self, form_id: str, now: float) -> None:
+        next_form = str(form_id or "normal").strip().lower() or "normal"
+        if next_form == self._active_form_id:
+            return
+        self._active_form_id = next_form
+        self._config.active_form_id = next_form
+        self._form_last_changed_at = now
+        settle_ms = int(
+            getattr(self._config, "form_detector", {}).get("settle_ms", 200) or 200
+        )
+        self._form_settle_until = now + max(0.0, settle_ms / 1000.0)
+        logger.info("Active form changed to '%s'", next_form)
+
+    def _update_active_form_id(self, now: float) -> None:
+        forms = self._forms_from_config()
+        fallback_form = (
+            str(getattr(self._config, "active_form_id", "normal") or "normal")
+            .strip()
+            .lower()
+        )
+        if fallback_form not in forms:
+            fallback_form = "normal"
+        detector = getattr(self._config, "form_detector", {}) or {}
+        if (
+            not isinstance(detector, dict)
+            or str(detector.get("type", "") or "").strip().lower() != "buff_roi"
+        ):
+            self._pending_form_id = fallback_form
+            self._pending_form_frames = 0
+            self._set_active_form_id(fallback_form, now)
+            return
+
+        roi_id = str(detector.get("roi_id", "") or "").strip().lower()
+        present_form = (
+            str(detector.get("present_form", "normal") or "normal").strip().lower()
+        )
+        absent_form = (
+            str(detector.get("absent_form", "normal") or "normal").strip().lower()
+        )
+        if present_form not in forms:
+            present_form = "normal"
+        if absent_form not in forms:
+            absent_form = "normal"
+        buff_state = self._buff_states.get(roi_id) if roi_id else None
+        if not isinstance(buff_state, dict):
+            self._pending_form_id = self._active_form_id
+            self._pending_form_frames = 0
+            return
+        if not bool(buff_state.get("calibrated", False)):
+            self._pending_form_id = self._active_form_id
+            self._pending_form_frames = 0
+            return
+        status = str(buff_state.get("status", "ok") or "").strip().lower()
+        if status and status != "ok":
+            self._pending_form_id = self._active_form_id
+            self._pending_form_frames = 0
+            return
+        target_form = (
+            present_form if bool(buff_state.get("present", False)) else absent_form
+        )
+        if target_form == self._active_form_id:
+            self._pending_form_id = target_form
+            self._pending_form_frames = 0
+            return
+        if self._pending_form_id != target_form:
+            self._pending_form_id = target_form
+            self._pending_form_frames = 1
+        else:
+            self._pending_form_frames += 1
+        confirm_frames = max(1, int(detector.get("confirm_frames", 2) or 2))
+        if self._pending_form_frames >= confirm_frames:
+            self._set_active_form_id(target_form, now)
+            self._pending_form_id = target_form
+            self._pending_form_frames = 0
+
+    def active_form_id(self) -> str:
+        return str(self._active_form_id or "normal")
+
+    def is_form_settling(self) -> bool:
+        return time.time() < self._form_settle_until
+
+    def _baseline_for_slot(self, slot_index: int) -> Optional[np.ndarray]:
+        active_form = self.active_form_id()
+        active = self._baselines_by_form.get(active_form, {})
+        normal = self._baselines_by_form.get("normal", {})
+        baseline = active.get(slot_index)
+        if baseline is not None:
+            return baseline
+        return normal.get(slot_index)
+
+    def _cooldown_group_id_for_slot(self, slot_index: int) -> str:
+        mapping = getattr(self._config, "cooldown_group_by_slot", {}) or {}
+        group_id = mapping.get(slot_index)
+        if not group_id:
+            return f"slot:{slot_index}"
+        return str(group_id).strip().lower() or f"slot:{slot_index}"
+
+    def calibrate_baselines(
+        self, frame: np.ndarray, form_id: Optional[str] = None
+    ) -> None:
         """Capture current frame as the 'ready' baseline for all slots.
 
         Stores the full grayscale (2D array) per slot for pixel-wise comparison.
@@ -246,17 +392,34 @@ class SlotAnalyzer:
         """
         self._frame_action_origin_x = 0
         self._frame_action_origin_y = 0
+        target_form = (
+            str(form_id or self._active_form_id or "normal").strip().lower() or "normal"
+        )
+        bucket = dict(self._baselines_by_form.get(target_form, {}))
         for slot_cfg in self._slot_configs:
             slot_img = self.crop_slot(frame, slot_cfg)
             gray = self._get_brightness_channel(slot_img)
             if gray.size == 0:
-                logger.warning(f"Skipping baseline for slot {slot_cfg.index}: empty crop")
+                logger.warning(
+                    f"Skipping baseline for slot {slot_cfg.index}: empty crop"
+                )
                 continue
-            self._baselines[slot_cfg.index] = gray.copy()
+            bucket[slot_cfg.index] = gray.copy()
             self._runtime[slot_cfg.index] = _SlotRuntime()
-        logger.info(f"Calibrated brightness baselines for {len(self._baselines)} slots")
+        self._baselines_by_form[target_form] = bucket
+        self._baselines = dict(self._baselines_by_form.get("normal", {}))
+        logger.info(
+            "Calibrated brightness baselines for %s slots in form '%s'",
+            len(bucket),
+            target_form,
+        )
 
-    def calibrate_single_slot(self, frame: np.ndarray, slot_index: int) -> None:
+    def calibrate_single_slot(
+        self,
+        frame: np.ndarray,
+        slot_index: int,
+        form_id: Optional[str] = None,
+    ) -> None:
         """Calibrate baseline for one slot only; overwrites that slot's entry in _baselines."""
         if slot_index < 0 or slot_index >= len(self._slot_configs):
             logger.warning(f"calibrate_single_slot: invalid slot_index {slot_index}")
@@ -269,18 +432,55 @@ class SlotAnalyzer:
         if gray.size == 0:
             logger.warning(f"calibrate_single_slot: empty crop for slot {slot_index}")
             return
-        self._baselines[slot_index] = gray.copy()
+        target_form = (
+            str(form_id or self._active_form_id or "normal").strip().lower() or "normal"
+        )
+        bucket = dict(self._baselines_by_form.get(target_form, {}))
+        bucket[slot_index] = gray.copy()
+        self._baselines_by_form[target_form] = bucket
+        self._baselines = dict(self._baselines_by_form.get("normal", {}))
         self._runtime[slot_index] = _SlotRuntime()
-        logger.info(f"Calibrated baseline for slot {slot_index}")
+        logger.info(
+            "Calibrated baseline for slot %s in form '%s'", slot_index, target_form
+        )
 
     def get_baselines(self) -> dict[int, np.ndarray]:
         """Return a copy of the current baselines (slot_index -> grayscale 2D array)."""
-        return {k: v.copy() for k, v in self._baselines.items()}
+        return {
+            k: v.copy() for k, v in self._baselines_by_form.get("normal", {}).items()
+        }
 
     def set_baselines(self, baselines: dict[int, np.ndarray]) -> None:
         """Load baselines from a previous session (e.g. from config)."""
-        self._baselines = {k: v.copy() for k, v in baselines.items()}
+        self._baselines_by_form["normal"] = {k: v.copy() for k, v in baselines.items()}
+        self._baselines = dict(self._baselines_by_form["normal"])
         logger.info(f"Loaded {len(self._baselines)} slot baselines from config")
+
+    def get_baselines_by_form(self) -> dict[str, dict[int, np.ndarray]]:
+        return {
+            form_id: {slot: arr.copy() for slot, arr in baselines.items()}
+            for form_id, baselines in self._baselines_by_form.items()
+        }
+
+    def set_baselines_by_form(
+        self, baselines_by_form: dict[str, dict[int, np.ndarray]]
+    ) -> None:
+        normalized: dict[str, dict[int, np.ndarray]] = {}
+        for form_id, baselines in dict(baselines_by_form or {}).items():
+            fid = str(form_id or "").strip().lower()
+            if not fid:
+                continue
+            if not isinstance(baselines, dict):
+                continue
+            normalized[fid] = {int(k): v.copy() for k, v in baselines.items()}
+        if "normal" not in normalized:
+            normalized["normal"] = {}
+        self._baselines_by_form = normalized
+        self._baselines = dict(self._baselines_by_form.get("normal", {}))
+        logger.info(
+            "Loaded slot baselines for %s forms from config",
+            len(self._baselines_by_form),
+        )
 
     def _cast_bar_active(self, frame: np.ndarray, action_x: int, action_y: int) -> bool:
         """Optional cast-bar activity detector using frame-to-frame ROI motion."""
@@ -338,21 +538,37 @@ class SlotAnalyzer:
         # Color-based presence (kept permissive for low-saturation UI themes).
         color_mask = (sat >= 28) & (val >= 28)
         color_cov = float(np.mean(color_mask)) if color_mask.size else 0.0
-        row_cov = np.mean(color_mask, axis=1) if color_mask.size else np.array([0.0], dtype=np.float32)
+        row_cov = (
+            np.mean(color_mask, axis=1)
+            if color_mask.size
+            else np.array([0.0], dtype=np.float32)
+        )
         row_peak = float(np.max(row_cov)) if row_cov.size else 0.0
         band_rows = float(np.mean(row_cov > 0.12)) if row_cov.size else 0.0
-        color_present = (color_cov >= 0.02) and (row_peak >= 0.20) and (band_rows <= 0.95)
+        color_present = (
+            (color_cov >= 0.02) and (row_peak >= 0.20) and (band_rows <= 0.95)
+        )
 
         # Structure-based presence fallback (for bars that are dim/desaturated).
         gray_present = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        row_means = np.mean(gray_present, axis=1) if gray_present.size else np.array([0.0], dtype=np.float32)
+        row_means = (
+            np.mean(gray_present, axis=1)
+            if gray_present.size
+            else np.array([0.0], dtype=np.float32)
+        )
         row_variation = float(np.std(row_means)) if row_means.size else 0.0
         gy = cv2.Sobel(gray_present, cv2.CV_32F, 0, 1, ksize=3)
         h_edges = np.abs(gy) > 18.0
-        row_edge_cov = np.mean(h_edges, axis=1) if h_edges.size else np.array([0.0], dtype=np.float32)
+        row_edge_cov = (
+            np.mean(h_edges, axis=1)
+            if h_edges.size
+            else np.array([0.0], dtype=np.float32)
+        )
         edge_peak = float(np.max(row_edge_cov)) if row_edge_cov.size else 0.0
         edge_band = float(np.mean(row_edge_cov > 0.06)) if row_edge_cov.size else 0.0
-        structure_present = (row_variation >= 2.0) and (edge_peak >= 0.08) and (edge_band <= 0.70)
+        structure_present = (
+            (row_variation >= 2.0) and (edge_peak >= 0.08) and (edge_band <= 0.70)
+        )
 
         bar_present = color_present or structure_present
         self._cast_bar_last_present = bar_present
@@ -375,10 +591,16 @@ class SlotAnalyzer:
         self._cast_bar_last_motion = motion
 
         motion_mask = diff > 12
-        col_cov = np.mean(motion_mask, axis=0) if motion_mask.size else np.array([0.0], dtype=np.float32)
+        col_cov = (
+            np.mean(motion_mask, axis=0)
+            if motion_mask.size
+            else np.array([0.0], dtype=np.float32)
+        )
         active_cols = np.where(col_cov > 0.10)[0]
         directional_ok = False
-        front = self._cast_bar_front_prev if self._cast_bar_front_prev is not None else 0.0
+        front = (
+            self._cast_bar_front_prev if self._cast_bar_front_prev is not None else 0.0
+        )
         if active_cols.size > 0 and col_cov.size > 1:
             cmin = int(active_cols.min())
             cmax = int(active_cols.max())
@@ -397,9 +619,13 @@ class SlotAnalyzer:
         self._cast_bar_last_directional = directional_ok
         self._cast_bar_last_front = float(front or 0.0)
 
-        history_frames = max(3, int(getattr(self._config, "cast_bar_history_frames", 8) or 8))
+        history_frames = max(
+            3, int(getattr(self._config, "cast_bar_history_frames", 8) or 8)
+        )
         if self._cast_bar_motion.maxlen != history_frames:
-            self._cast_bar_motion = deque(list(self._cast_bar_motion), maxlen=history_frames)
+            self._cast_bar_motion = deque(
+                list(self._cast_bar_motion), maxlen=history_frames
+            )
         if len(self._cast_bar_motion) < 2:
             self._cast_bar_last_status = "priming"
             return False
@@ -449,7 +675,9 @@ class SlotAnalyzer:
             return None
 
     @staticmethod
-    def _template_similarity(gray_roi: np.ndarray, gray_template: Optional[np.ndarray]) -> float:
+    def _template_similarity(
+        gray_roi: np.ndarray, gray_template: Optional[np.ndarray]
+    ) -> float:
         if gray_template is None or gray_template.size == 0 or gray_roi.size == 0:
             return 0.0
         if gray_template.shape != gray_roi.shape:
@@ -479,8 +707,12 @@ class SlotAnalyzer:
         red_h_max_low = int(getattr(self._config, "glow_red_hue_max_low", 12) or 12)
         red_h_min_high = int(getattr(self._config, "glow_red_hue_min_high", 168) or 168)
         sat_min = int(getattr(self._config, "glow_saturation_min", 80) or 80)
-        glow_confirm_frames = max(1, int(getattr(self._config, "glow_confirm_frames", 2) or 2))
-        red_frac_thresh = float(getattr(self._config, "glow_red_ring_fraction", 0.18) or 0.18)
+        glow_confirm_frames = max(
+            1, int(getattr(self._config, "glow_confirm_frames", 2) or 2)
+        )
+        red_frac_thresh = float(
+            getattr(self._config, "glow_red_ring_fraction", 0.18) or 0.18
+        )
         for raw in list(getattr(self._config, "buff_rois", []) or []):
             if not isinstance(raw, dict):
                 continue
@@ -547,7 +779,11 @@ class SlotAnalyzer:
                     sat = hsv[:, :, 1].astype(np.int16)
                     val = hsv[:, :, 2].astype(np.int16)
                     h, w = roi_gray.shape
-                    ring = self._ring_mask(h, w, int(getattr(self._config, "glow_ring_thickness_px", 4) or 4))
+                    ring = self._ring_mask(
+                        h,
+                        w,
+                        int(getattr(self._config, "glow_ring_thickness_px", 4) or 4),
+                    )
                     if np.any(ring):
                         val_floor = max(64, int(np.percentile(val[ring], 60)))
                         red_cond = (
@@ -561,7 +797,9 @@ class SlotAnalyzer:
                         runtime.red_glow_candidate_frames += 1
                     else:
                         runtime.red_glow_candidate_frames = 0
-                    red_glow_ready = runtime.red_glow_candidate_frames >= glow_confirm_frames
+                    red_glow_ready = (
+                        runtime.red_glow_candidate_frames >= glow_confirm_frames
+                    )
 
             states[buff_id] = {
                 "id": buff_id,
@@ -604,6 +842,13 @@ class SlotAnalyzer:
             "gate_active": bool(self._cast_gate_active),
         }
 
+    def form_state(self) -> dict:
+        return {
+            "active_form_id": self.active_form_id(),
+            "settling": self.is_form_settling(),
+            "last_changed_at": float(self._form_last_changed_at),
+        }
+
     def _next_state_with_cast_logic(
         self,
         slot_index: int,
@@ -611,21 +856,38 @@ class SlotAnalyzer:
         is_raw_cooldown: bool,
         now: float,
         cast_gate_active: bool = True,
-    ) -> tuple[SlotState, Optional[float], Optional[float], Optional[float], Optional[float]]:
+    ) -> tuple[
+        SlotState, Optional[float], Optional[float], Optional[float], Optional[float]
+    ]:
         """Return cast-aware state and timing metadata for one slot."""
         runtime = self._runtime.setdefault(slot_index, _SlotRuntime())
         cast_enabled = bool(getattr(self._config, "cast_detection_enabled", True))
-        min_frac = float(getattr(self._config, "cast_candidate_min_fraction", 0.05) or 0.05)
-        max_frac = float(getattr(self._config, "cast_candidate_max_fraction", 0.22) or 0.22)
-        confirm_frames = max(1, int(getattr(self._config, "cast_confirm_frames", 2) or 2))
-        cast_min_sec = max(0.05, (getattr(self._config, "cast_min_duration_ms", 150) or 150) / 1000.0)
-        cast_max_sec = max(cast_min_sec, (getattr(self._config, "cast_max_duration_ms", 3000) or 3000) / 1000.0)
-        cancel_grace_sec = max(0.0, (getattr(self._config, "cast_cancel_grace_ms", 120) or 120) / 1000.0)
+        min_frac = float(
+            getattr(self._config, "cast_candidate_min_fraction", 0.05) or 0.05
+        )
+        max_frac = float(
+            getattr(self._config, "cast_candidate_max_fraction", 0.22) or 0.22
+        )
+        confirm_frames = max(
+            1, int(getattr(self._config, "cast_confirm_frames", 2) or 2)
+        )
+        cast_min_sec = max(
+            0.05, (getattr(self._config, "cast_min_duration_ms", 150) or 150) / 1000.0
+        )
+        cast_max_sec = max(
+            cast_min_sec,
+            (getattr(self._config, "cast_max_duration_ms", 3000) or 3000) / 1000.0,
+        )
+        cancel_grace_sec = max(
+            0.0, (getattr(self._config, "cast_cancel_grace_ms", 120) or 120) / 1000.0
+        )
         channeling_enabled = bool(getattr(self._config, "channeling_enabled", True))
         cast_candidate = min_frac <= darkened_fraction < max_frac
 
         if not cast_enabled:
-            runtime.state = SlotState.ON_COOLDOWN if is_raw_cooldown else SlotState.READY
+            runtime.state = (
+                SlotState.ON_COOLDOWN if is_raw_cooldown else SlotState.READY
+            )
             runtime.cast_candidate_frames = 0
             runtime.cast_started_at = None
             runtime.cast_ends_at = None
@@ -775,12 +1037,15 @@ class SlotAnalyzer:
         thresh = self._config.brightness_drop_threshold
         frac_thresh = self._config.cooldown_pixel_fraction
         change_frac_thresh = float(
-            getattr(self._config, "cooldown_change_pixel_fraction", frac_thresh) or frac_thresh
+            getattr(self._config, "cooldown_change_pixel_fraction", frac_thresh)
+            or frac_thresh
         )
         cooldown_min_sec = max(
             0.0, (getattr(self._config, "cooldown_min_duration_ms", 0) or 0) / 1000.0
         )
-        glow_confirm_frames = max(1, int(getattr(self._config, "glow_confirm_frames", 2) or 2))
+        glow_confirm_frames = max(
+            1, int(getattr(self._config, "glow_confirm_frames", 2) or 2)
+        )
         cast_bar_active = self._cast_bar_active(
             frame,
             self._frame_action_origin_x,
@@ -791,19 +1056,30 @@ class SlotAnalyzer:
         if cast_bar_active:
             # Keep gate active briefly to absorb frame ordering jitter between ROI motion and icon darkening.
             self._cast_bar_active_until = now + 0.25
-        cast_gate_active = (not cast_roi_enabled) or cast_bar_active or (now < self._cast_bar_active_until)
+        cast_gate_active = (
+            (not cast_roi_enabled)
+            or cast_bar_active
+            or (now < self._cast_bar_active_until)
+        )
         self._cast_gate_active = cast_gate_active
         self._analyze_buffs(frame, action_origin)
+        self._update_active_form_id(now)
+        form_settling = now < self._form_settle_until
         override_slots = {
             int(v)
-            for v in list(getattr(self._config, "glow_override_cooldown_by_slot", []) or [])
+            for v in list(
+                getattr(self._config, "glow_override_cooldown_by_slot", []) or []
+            )
             if str(v).strip()
         }
         change_ignore_slots = {
             int(v)
-            for v in list(getattr(self._config, "cooldown_change_ignore_by_slot", []) or [])
+            for v in list(
+                getattr(self._config, "cooldown_change_ignore_by_slot", []) or []
+            )
             if str(v).strip()
         }
+        cooldown_groups_raw_seen: dict[str, bool] = {}
 
         for slot_cfg in self._slot_configs:
             slot_img = self.crop_slot(frame, slot_cfg)
@@ -843,7 +1119,9 @@ class SlotAnalyzer:
                 last_cast_success_at = None
             else:
                 # Pixels where brightness dropped by more than threshold (uses detection region only)
-                drop = baseline_bright_for_frac.astype(np.int16) - current_bright.astype(np.int16)
+                drop = baseline_bright_for_frac.astype(
+                    np.int16
+                ) - current_bright.astype(np.int16)
                 darkened_count = np.sum(drop > thresh)
                 total = current_bright.size
                 darkened_fraction = darkened_count / total if total else 0.0
@@ -863,7 +1141,16 @@ class SlotAnalyzer:
                 # release threshold before it can return to ready. This prevents
                 # per-icon art/animation from flipping ready several seconds early.
                 runtime = self._runtime.setdefault(slot_cfg.index, _SlotRuntime())
-                if runtime.state == SlotState.ON_COOLDOWN:
+                group_id = self._cooldown_group_id_for_slot(slot_cfg.index)
+                group_runtime = self._cooldown_group_runtime.setdefault(
+                    group_id,
+                    _CooldownGroupRuntime(),
+                )
+                cooldown_groups_raw_seen[group_id] = cooldown_groups_raw_seen.get(
+                    group_id, False
+                ) or bool(raw_cooldown)
+                prev_state = runtime.state
+                if runtime.state == SlotState.ON_COOLDOWN or group_runtime.was_cooldown:
                     release_factor = 0.5
                     dark_release_thresh = frac_thresh * release_factor
                     change_release_thresh = change_frac_thresh * release_factor
@@ -871,15 +1158,18 @@ class SlotAnalyzer:
                     hold_changed_cooldown = (not ignore_change_for_slot) and (
                         changed_fraction >= change_release_thresh
                     )
-                    raw_cooldown = raw_cooldown or hold_dark_cooldown or hold_changed_cooldown
+                    raw_cooldown = (
+                        raw_cooldown or hold_dark_cooldown or hold_changed_cooldown
+                    )
                 cooldown_pending = False
                 if raw_cooldown:
-                    if runtime.cooldown_candidate_started_at is None:
-                        runtime.cooldown_candidate_started_at = now
+                    if group_runtime.cooldown_candidate_started_at is None:
+                        group_runtime.cooldown_candidate_started_at = now
                     if (
-                        runtime.state != SlotState.ON_COOLDOWN
+                        not group_runtime.was_cooldown
                         and cooldown_min_sec > 0.0
-                        and (now - runtime.cooldown_candidate_started_at) < cooldown_min_sec
+                        and (now - group_runtime.cooldown_candidate_started_at)
+                        < cooldown_min_sec
                     ):
                         cooldown_pending = True
                 else:
@@ -899,6 +1189,13 @@ class SlotAnalyzer:
                 )
                 if cooldown_pending and state == SlotState.READY:
                     state = SlotState.GCD
+                if (
+                    form_settling
+                    and prev_state != SlotState.UNKNOWN
+                    and state not in (SlotState.CASTING, SlotState.CHANNELING)
+                    and state != prev_state
+                ):
+                    state = prev_state
                 (
                     yellow_glow_candidate,
                     yellow_glow_fraction,
@@ -920,18 +1217,27 @@ class SlotAnalyzer:
                 else:
                     runtime.red_glow_candidate_frames = 0
                 glow_ready = runtime.glow_candidate_frames >= glow_confirm_frames
-                yellow_glow_ready = runtime.yellow_glow_candidate_frames >= glow_confirm_frames
-                red_glow_ready = runtime.red_glow_candidate_frames >= glow_confirm_frames
+                yellow_glow_ready = (
+                    runtime.yellow_glow_candidate_frames >= glow_confirm_frames
+                )
+                red_glow_ready = (
+                    runtime.red_glow_candidate_frames >= glow_confirm_frames
+                )
                 allow_any_glow_override = slot_cfg.index in override_slots
                 # Red glow is an explicit "refresh now" cue for DoT-style rules.
                 # Allow it to override ON_COOLDOWN regardless of darkening source.
-                if (red_glow_ready or (allow_any_glow_override and glow_ready)) and state == SlotState.ON_COOLDOWN:
+                if (
+                    red_glow_ready or (allow_any_glow_override and glow_ready)
+                ) and state == SlotState.ON_COOLDOWN:
                     state = SlotState.READY
                 if cast_bar_active and bool(
                     getattr(self._config, "lock_ready_while_cast_bar_active", False)
                 ):
                     if state == SlotState.READY:
                         state = SlotState.LOCKED
+                group_runtime.was_cooldown = group_runtime.was_cooldown or (
+                    state == SlotState.ON_COOLDOWN
+                )
 
             # TODO Phase 2: If on cooldown and OCR enabled, read countdown number
             cooldown_remaining = None
@@ -960,6 +1266,11 @@ class SlotAnalyzer:
             )
 
         # Log per-slot summary occasionally for debugging
+        for group_id, group_runtime in self._cooldown_group_runtime.items():
+            raw_seen = cooldown_groups_raw_seen.get(group_id, False)
+            if not raw_seen:
+                group_runtime.cooldown_candidate_started_at = None
+                group_runtime.was_cooldown = False
         self._analyze_frame_count += 1
         if logger.isEnabledFor(logging.DEBUG) and self._analyze_frame_count % 30 == 0:
             summary = ", ".join(

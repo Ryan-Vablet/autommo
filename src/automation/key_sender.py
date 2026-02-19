@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 from src.models import ActionBarState, SlotState
 from src.automation.binds import normalize_bind
 from src.automation.priority_rules import (
+    item_matches_form,
     manual_item_is_eligible,
     slot_item_is_eligible_for_snapshot,
 )
@@ -127,11 +128,13 @@ class KeySender:
                     }
 
         slots_by_index = {s.index: s for s in state.slots}
+        active_form_id = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower()
         # Queued key fires only when at least one slot-type priority item is READY
         # (used as a practical "GCD over" signal).
         any_priority_ready = any(
             (
                 isinstance(item, dict)
+                and item_matches_form(item, active_form_id)
                 and str(item.get("type", "") or "").strip().lower() == "slot"
                 and isinstance(item.get("slot_index"), int)
                 and (slots_by_index.get(item["slot_index"]) is not None)
@@ -245,12 +248,16 @@ class KeySender:
                     continue
                 slot = slots_by_index.get(slot_index)
                 if not slot_item_is_eligible_for_snapshot(
-                    item, slot, buff_states=buff_states
+                    item, slot, buff_states=buff_states, active_form_id=active_form_id
                 ):
                     continue
                 keybind = keybinds[slot_index] if slot_index < len(keybinds) else None
             elif item_type == "manual":
-                if not manual_item_is_eligible(item, buff_states=buff_states):
+                if not manual_item_is_eligible(
+                    item,
+                    buff_states=buff_states,
+                    active_form_id=active_form_id,
+                ):
                     continue
                 action_id = str(item.get("action_id", "") or "").strip().lower()
                 if not action_id:

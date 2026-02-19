@@ -22,6 +22,7 @@ class SlotState(Enum):
 @dataclass
 class SlotConfig:
     """Static configuration for a single action bar slot."""
+
     index: int
     # Pixel region relative to the captured action bar image (not screen coords)
     x_offset: int = 0
@@ -33,6 +34,7 @@ class SlotConfig:
 @dataclass
 class SlotSnapshot:
     """The analyzed state of a single slot at a point in time."""
+
     index: int
     state: SlotState = SlotState.UNKNOWN
     keybind: Optional[str] = None
@@ -65,6 +67,7 @@ class SlotSnapshot:
 @dataclass
 class ActionBarState:
     """Complete state of all slots at a point in time."""
+
     slots: list[SlotSnapshot] = field(default_factory=list)
     timestamp: float = 0.0
 
@@ -81,12 +84,15 @@ class ActionBarState:
 @dataclass
 class BoundingBox:
     """Screen-relative bounding box for capture region."""
+
     top: int = 900
     left: int = 500
     width: int = 400
     height: int = 50
 
-    def as_mss_region(self, monitor_offset_x: int = 0, monitor_offset_y: int = 0) -> dict:
+    def as_mss_region(
+        self, monitor_offset_x: int = 0, monitor_offset_y: int = 0
+    ) -> dict:
         """Convert to mss-compatible region dict."""
         return {
             "top": self.top + monitor_offset_y,
@@ -97,21 +103,33 @@ class BoundingBox:
 
     def to_dict(self) -> dict:
         """Serialize to dict for JSON config file."""
-        return {"top": self.top, "left": self.left, "width": self.width, "height": self.height}
+        return {
+            "top": self.top,
+            "left": self.left,
+            "width": self.width,
+            "height": self.height,
+        }
 
 
 @dataclass
 class AppConfig:
     """Runtime application configuration."""
+
     monitor_index: int = 1
     bounding_box: BoundingBox = field(default_factory=BoundingBox)
     slot_count: int = 10
     slot_gap_pixels: int = 2
     slot_padding: int = 3
     polling_fps: int = 20
-    brightness_threshold: float = 0.65  # Deprecated; kept for compatibility / future use
-    brightness_drop_threshold: int = 40  # 0-255; pixel counts as darkened if brightness dropped by more
-    cooldown_pixel_fraction: float = 0.30  # ON_COOLDOWN if this fraction of pixels darkened
+    brightness_threshold: float = (
+        0.65  # Deprecated; kept for compatibility / future use
+    )
+    brightness_drop_threshold: int = (
+        40  # 0-255; pixel counts as darkened if brightness dropped by more
+    )
+    cooldown_pixel_fraction: float = (
+        0.30  # ON_COOLDOWN if this fraction of pixels darkened
+    )
     cooldown_min_duration_ms: int = 2000
     # Extra detector: absolute baseline change fraction (captures bright overlays).
     cooldown_change_pixel_fraction: float = 0.30
@@ -121,6 +139,8 @@ class AppConfig:
     detection_region: str = "top_left"
     # Per-slot override (slot_index -> "full"|"top_left"). Empty for now; allows future per-slot region.
     detection_region_overrides: dict[int, str] = field(default_factory=dict)
+    # Optional cooldown group sharing across slots: {slot_index: "group_id"}.
+    cooldown_group_by_slot: dict[int, str] = field(default_factory=dict)
     cast_detection_enabled: bool = True
     cast_candidate_min_fraction: float = 0.05
     cast_candidate_max_fraction: float = 0.22
@@ -157,11 +177,23 @@ class AppConfig:
     overlay_border_color: str = "#00FF00"
     show_active_screen_outline: bool = False
     always_on_top: bool = False
-    keybinds: list[str] = field(default_factory=list)  # keybinds[slot_index] = key string, e.g. "5", "F"
+    keybinds: list[str] = field(
+        default_factory=list
+    )  # keybinds[slot_index] = key string, e.g. "5", "F"
     # User-defined display names per slot (e.g. "Fireball"); empty/missing = "Unidentified"
     slot_display_names: list[str] = field(default_factory=list)
     # Persisted baselines: list of {"shape": [h, w], "data": base64} per slot (decoded at runtime in analyzer)
     slot_baselines: list = field(default_factory=list)
+    # Persisted per-form baselines: {form_id: [{shape:[h,w], data:base64}, ...]}
+    slot_baselines_by_form: dict = field(default_factory=dict)
+    # Supported visual forms (normal + transform/stance variants).
+    forms: list[dict] = field(
+        default_factory=lambda: [{"id": "normal", "name": "Normal"}]
+    )
+    # Current form id for UI/defaults; analyzer owns live active form detection.
+    active_form_id: str = "normal"
+    # Optional active-form detector configuration.
+    form_detector: dict = field(default_factory=dict)
     # Slot indices that had their baseline set by "Calibrate This Slot" (show bold in UI)
     overwritten_baseline_slots: list[int] = field(default_factory=list)
     # Buff ROI templates used for buff-present / buff-missing readiness rules.
@@ -206,7 +238,9 @@ class AppConfig:
             if aid in seen_ids:
                 continue
             seen_ids.add(aid)
-            name = str(raw.get("name", "") or "").strip() or aid.replace("_", " ").title()
+            name = (
+                str(raw.get("name", "") or "").strip() or aid.replace("_", " ").title()
+            )
             keybind = normalize_bind(str(raw.get("keybind", "") or ""))
             normalized.append({"id": aid, "name": name, "keybind": keybind})
         return normalized
@@ -231,6 +265,73 @@ class AppConfig:
         if source in ("slot", "always", "buff_present", "buff_missing"):
             return source
         return "always" if item_type == "manual" else "slot"
+
+    @staticmethod
+    def _normalize_form_id(raw_form_id: object) -> str:
+        form_id = str(raw_form_id or "").strip().lower()
+        return form_id or "normal"
+
+    @staticmethod
+    def _normalize_required_form(raw_required_form: object, form_ids: set[str]) -> str:
+        required = str(raw_required_form or "").strip().lower()
+        if not required:
+            return ""
+        return required if required in form_ids else ""
+
+    @staticmethod
+    def _normalize_forms(raw_forms: object) -> list[dict]:
+        normalized: list[dict] = []
+        seen: set[str] = set()
+        for raw in list(raw_forms or []):
+            if not isinstance(raw, dict):
+                continue
+            form_id = AppConfig._normalize_form_id(raw.get("id"))
+            if form_id in seen:
+                continue
+            seen.add(form_id)
+            name = str(raw.get("name", "") or "").strip() or form_id.title()
+            normalized.append({"id": form_id, "name": name})
+        if "normal" not in seen:
+            normalized.insert(0, {"id": "normal", "name": "Normal"})
+        return normalized
+
+    @staticmethod
+    def _normalize_form_detector(raw_detector: object, form_ids: set[str]) -> dict:
+        if not isinstance(raw_detector, dict):
+            return {}
+        detector_type = str(raw_detector.get("type", "") or "").strip().lower()
+        if detector_type != "buff_roi":
+            return {}
+        roi_id = str(raw_detector.get("roi_id", "") or "").strip().lower()
+        present_form = AppConfig._normalize_form_id(raw_detector.get("present_form"))
+        absent_form = AppConfig._normalize_form_id(raw_detector.get("absent_form"))
+        if present_form not in form_ids:
+            present_form = "normal"
+        if absent_form not in form_ids:
+            absent_form = "normal"
+        return {
+            "type": "buff_roi",
+            "roi_id": roi_id,
+            "present_form": present_form,
+            "absent_form": absent_form,
+            "confirm_frames": max(1, int(raw_detector.get("confirm_frames", 2) or 2)),
+            "settle_ms": max(0, int(raw_detector.get("settle_ms", 200) or 200)),
+        }
+
+    @staticmethod
+    def _normalize_slot_baselines_by_form(
+        raw_baselines: object, form_ids: set[str]
+    ) -> dict:
+        if not isinstance(raw_baselines, dict):
+            return {}
+        normalized: dict[str, list] = {}
+        for form_id, baselines in raw_baselines.items():
+            fid = AppConfig._normalize_form_id(form_id)
+            if fid not in form_ids:
+                continue
+            if isinstance(baselines, list):
+                normalized[fid] = list(baselines)
+        return normalized
 
     @staticmethod
     def _normalize_buff_template(raw_template: object) -> Optional[dict]:
@@ -273,7 +374,8 @@ class AppConfig:
             normalized.append(
                 {
                     "id": rid,
-                    "name": str(raw.get("name", "") or "").strip() or rid.replace("_", " ").title(),
+                    "name": str(raw.get("name", "") or "").strip()
+                    or rid.replace("_", " ").title(),
                     "enabled": bool(raw.get("enabled", True)),
                     "left": int(raw.get("left", 0)),
                     "top": int(raw.get("top", 0)),
@@ -292,7 +394,11 @@ class AppConfig:
         return normalized
 
     @staticmethod
-    def _normalize_priority_items(raw_items: object, fallback_order: object) -> list[dict]:
+    def _normalize_priority_items(
+        raw_items: object,
+        fallback_order: object,
+        form_ids: set[str],
+    ) -> list[dict]:
         """
         Normalize profile priority items to:
         [{type:'slot', slot_index:int, activation_rule:str} | {type:'manual', action_id:str}]
@@ -307,6 +413,7 @@ class AppConfig:
                         "activation_rule": "always",
                         "ready_source": "slot",
                         "buff_roi_id": "",
+                        "required_form": "",
                     }
                 )
                 continue
@@ -326,7 +433,13 @@ class AppConfig:
                             "ready_source": AppConfig._normalize_ready_source(
                                 raw.get("ready_source"), "slot"
                             ),
-                            "buff_roi_id": str(raw.get("buff_roi_id", "") or "").strip().lower(),
+                            "buff_roi_id": str(raw.get("buff_roi_id", "") or "")
+                            .strip()
+                            .lower(),
+                            "required_form": AppConfig._normalize_required_form(
+                                raw.get("required_form"),
+                                form_ids,
+                            ),
                         }
                     )
             elif itype == "manual":
@@ -339,7 +452,13 @@ class AppConfig:
                             "ready_source": AppConfig._normalize_ready_source(
                                 raw.get("ready_source"), "manual"
                             ),
-                            "buff_roi_id": str(raw.get("buff_roi_id", "") or "").strip().lower(),
+                            "buff_roi_id": str(raw.get("buff_roi_id", "") or "")
+                            .strip()
+                            .lower(),
+                            "required_form": AppConfig._normalize_required_form(
+                                raw.get("required_form"),
+                                form_ids,
+                            ),
                         }
                     )
         if normalized:
@@ -351,6 +470,7 @@ class AppConfig:
                 "activation_rule": "always",
                 "ready_source": "slot",
                 "buff_roi_id": "",
+                "required_form": "",
             }
             for i in list(fallback_order or [])
             if isinstance(i, int)
@@ -360,6 +480,22 @@ class AppConfig:
         """Ensure automation profiles are valid and there is always an active profile."""
         self.keybinds = self._normalize_slot_keybinds(self.keybinds)
         self.buff_rois = self._normalize_buff_rois(self.buff_rois)
+        self.forms = self._normalize_forms(self.forms)
+        form_ids = {str(f.get("id", "") or "").strip().lower() for f in self.forms}
+        self.active_form_id = self._normalize_form_id(self.active_form_id)
+        if self.active_form_id not in form_ids:
+            self.active_form_id = "normal"
+        self.form_detector = self._normalize_form_detector(self.form_detector, form_ids)
+        self.slot_baselines_by_form = self._normalize_slot_baselines_by_form(
+            self.slot_baselines_by_form,
+            form_ids,
+        )
+        if not self.slot_baselines_by_form and isinstance(self.slot_baselines, list):
+            self.slot_baselines_by_form = {"normal": list(self.slot_baselines)}
+        # Keep legacy mirror field aligned for compatibility with older code paths.
+        self.slot_baselines = list(
+            self.slot_baselines_by_form.get("normal", self.slot_baselines)
+        )
         normalized: list[dict] = []
         seen_ids: set[str] = set()
         for p in list(self.priority_profiles or []):
@@ -379,7 +515,9 @@ class AppConfig:
             manual_action_ids = {str(a.get("id", "") or "") for a in manual_actions}
             priority_items = [
                 item
-                for item in self._normalize_priority_items(p.get("priority_items", []), order)
+                for item in self._normalize_priority_items(
+                    p.get("priority_items", []), order, form_ids
+                )
                 if (
                     item.get("type") == "slot"
                     or str(item.get("action_id", "") or "") in manual_action_ids
@@ -388,7 +526,8 @@ class AppConfig:
             slot_order = [
                 int(item["slot_index"])
                 for item in priority_items
-                if item.get("type") == "slot" and isinstance(item.get("slot_index"), int)
+                if item.get("type") == "slot"
+                and isinstance(item.get("slot_index"), int)
             ]
             toggle_bind = normalize_bind(str(p.get("toggle_bind", "") or ""))
             single_fire_bind = normalize_bind(str(p.get("single_fire_bind", "") or ""))
@@ -409,7 +548,9 @@ class AppConfig:
                 {
                     "id": "default",
                     "name": "Default",
-                    "priority_order": [int(i) for i in self.priority_order if isinstance(i, int)],
+                    "priority_order": [
+                        int(i) for i in self.priority_order if isinstance(i, int)
+                    ],
                     "priority_items": [
                         {
                             "type": "slot",
@@ -417,15 +558,19 @@ class AppConfig:
                             "activation_rule": "always",
                             "ready_source": "slot",
                             "buff_roi_id": "",
+                            "required_form": "",
                         }
                         for i in self.priority_order
                         if isinstance(i, int)
                     ],
                     "manual_actions": [],
-                    "toggle_bind": normalize_bind(str(self.automation_toggle_bind or "")),
+                    "toggle_bind": normalize_bind(
+                        str(self.automation_toggle_bind or "")
+                    ),
                     "single_fire_bind": (
                         normalize_bind(str(self.automation_toggle_bind or ""))
-                        if (self.automation_hotkey_mode or "").strip().lower() == "single_fire"
+                        if (self.automation_hotkey_mode or "").strip().lower()
+                        == "single_fire"
                         else ""
                     ),
                 }
@@ -481,13 +626,19 @@ class AppConfig:
     @classmethod
     def from_dict(cls, data: dict) -> AppConfig:
         bb = data.get("bounding_box", {})
-        raw_glow_delta_by_slot = data.get("detection", {}).get("glow_value_delta_by_slot", {})
+        raw_glow_delta_by_slot = data.get("detection", {}).get(
+            "glow_value_delta_by_slot", {}
+        )
         if not isinstance(raw_glow_delta_by_slot, dict):
             raw_glow_delta_by_slot = {}
-        raw_glow_ring_frac_by_slot = data.get("detection", {}).get("glow_ring_fraction_by_slot", {})
+        raw_glow_ring_frac_by_slot = data.get("detection", {}).get(
+            "glow_ring_fraction_by_slot", {}
+        )
         if not isinstance(raw_glow_ring_frac_by_slot, dict):
             raw_glow_ring_frac_by_slot = {}
-        raw_glow_override_slots = data.get("detection", {}).get("glow_override_cooldown_by_slot", [])
+        raw_glow_override_slots = data.get("detection", {}).get(
+            "glow_override_cooldown_by_slot", []
+        )
         if not isinstance(raw_glow_override_slots, list):
             raw_glow_override_slots = []
         raw_cooldown_change_ignore_slots = data.get("detection", {}).get(
@@ -495,6 +646,11 @@ class AppConfig:
         )
         if not isinstance(raw_cooldown_change_ignore_slots, list):
             raw_cooldown_change_ignore_slots = []
+        raw_cooldown_group_by_slot = data.get("detection", {}).get(
+            "cooldown_group_by_slot", {}
+        )
+        if not isinstance(raw_cooldown_group_by_slot, dict):
+            raw_cooldown_group_by_slot = {}
         parsed_glow_delta_by_slot: dict[int, int] = {}
         for k, v in raw_glow_delta_by_slot.items():
             try:
@@ -537,10 +693,16 @@ class AppConfig:
                 continue
             seen_change_ignore_slots.add(slot_idx)
             parsed_cooldown_change_ignore_slots.append(slot_idx)
-        raw_detection_region = (data.get("detection", {}).get("detection_region") or "top_left").strip().lower()
+        raw_detection_region = (
+            (data.get("detection", {}).get("detection_region") or "top_left")
+            .strip()
+            .lower()
+        )
         if raw_detection_region not in ("full", "top_left"):
             raw_detection_region = "top_left"
-        raw_region_overrides = data.get("detection", {}).get("detection_region_overrides") or {}
+        raw_region_overrides = (
+            data.get("detection", {}).get("detection_region_overrides") or {}
+        )
         parsed_region_overrides: dict[int, str] = {}
         if isinstance(raw_region_overrides, dict):
             for k, v in raw_region_overrides.items():
@@ -551,7 +713,19 @@ class AppConfig:
                         parsed_region_overrides[slot_idx] = mode
                 except (ValueError, TypeError):
                     continue
-        hotkey_mode = (data.get("automation_hotkey_mode", "toggle") or "toggle").strip().lower()
+        parsed_cooldown_group_by_slot: dict[int, str] = {}
+        for k, v in raw_cooldown_group_by_slot.items():
+            try:
+                slot_idx = int(k)
+            except Exception:
+                continue
+            group_id = str(v or "").strip().lower()
+            if slot_idx < 0 or not group_id:
+                continue
+            parsed_cooldown_group_by_slot[slot_idx] = group_id
+        hotkey_mode = (
+            (data.get("automation_hotkey_mode", "toggle") or "toggle").strip().lower()
+        )
         if hotkey_mode not in ("toggle", "single_fire"):
             hotkey_mode = "toggle"
         cfg = cls(
@@ -561,13 +735,19 @@ class AppConfig:
             slot_gap_pixels=data.get("slots", {}).get("gap_pixels", 2),
             slot_padding=data.get("slots", {}).get("padding", 3),
             polling_fps=data.get("detection", {}).get("polling_fps", 20),
-            brightness_threshold=data.get("detection", {}).get("brightness_threshold", 0.65),
+            brightness_threshold=data.get("detection", {}).get(
+                "brightness_threshold", 0.65
+            ),
             brightness_drop_threshold=data.get("detection", {}).get(
                 "brightness_drop_threshold",
                 data.get("detection", {}).get("saturation_drop_threshold", 40),
             ),
-            cooldown_pixel_fraction=data.get("detection", {}).get("cooldown_pixel_fraction", 0.30),
-            cooldown_min_duration_ms=data.get("detection", {}).get("cooldown_min_duration_ms", 2000),
+            cooldown_pixel_fraction=data.get("detection", {}).get(
+                "cooldown_pixel_fraction", 0.30
+            ),
+            cooldown_min_duration_ms=data.get("detection", {}).get(
+                "cooldown_min_duration_ms", 2000
+            ),
             cooldown_change_pixel_fraction=data.get("detection", {}).get(
                 "cooldown_change_pixel_fraction",
                 data.get("detection", {}).get("cooldown_pixel_fraction", 0.30),
@@ -575,16 +755,33 @@ class AppConfig:
             cooldown_change_ignore_by_slot=parsed_cooldown_change_ignore_slots,
             detection_region=raw_detection_region,
             detection_region_overrides=parsed_region_overrides,
-            cast_detection_enabled=data.get("detection", {}).get("cast_detection_enabled", True),
-            cast_candidate_min_fraction=data.get("detection", {}).get("cast_candidate_min_fraction", 0.05),
-            cast_candidate_max_fraction=data.get("detection", {}).get("cast_candidate_max_fraction", 0.22),
+            cooldown_group_by_slot=parsed_cooldown_group_by_slot,
+            cast_detection_enabled=data.get("detection", {}).get(
+                "cast_detection_enabled", True
+            ),
+            cast_candidate_min_fraction=data.get("detection", {}).get(
+                "cast_candidate_min_fraction", 0.05
+            ),
+            cast_candidate_max_fraction=data.get("detection", {}).get(
+                "cast_candidate_max_fraction", 0.22
+            ),
             cast_confirm_frames=data.get("detection", {}).get("cast_confirm_frames", 2),
-            cast_min_duration_ms=data.get("detection", {}).get("cast_min_duration_ms", 150),
-            cast_max_duration_ms=data.get("detection", {}).get("cast_max_duration_ms", 3000),
-            cast_cancel_grace_ms=data.get("detection", {}).get("cast_cancel_grace_ms", 120),
-            channeling_enabled=data.get("detection", {}).get("channeling_enabled", True),
+            cast_min_duration_ms=data.get("detection", {}).get(
+                "cast_min_duration_ms", 150
+            ),
+            cast_max_duration_ms=data.get("detection", {}).get(
+                "cast_max_duration_ms", 3000
+            ),
+            cast_cancel_grace_ms=data.get("detection", {}).get(
+                "cast_cancel_grace_ms", 120
+            ),
+            channeling_enabled=data.get("detection", {}).get(
+                "channeling_enabled", True
+            ),
             queue_window_ms=data.get("detection", {}).get("queue_window_ms", 120),
-            allow_cast_while_casting=data.get("detection", {}).get("allow_cast_while_casting", False),
+            allow_cast_while_casting=data.get("detection", {}).get(
+                "allow_cast_while_casting", False
+            ),
             lock_ready_while_cast_bar_active=data.get("detection", {}).get(
                 "lock_ready_while_cast_bar_active",
                 False,
@@ -594,13 +791,21 @@ class AppConfig:
                 "cast_bar_activity_threshold",
                 12.0,
             ),
-            cast_bar_history_frames=data.get("detection", {}).get("cast_bar_history_frames", 8),
+            cast_bar_history_frames=data.get("detection", {}).get(
+                "cast_bar_history_frames", 8
+            ),
             glow_enabled=data.get("detection", {}).get("glow_enabled", True),
-            glow_ring_thickness_px=int(data.get("detection", {}).get("glow_ring_thickness_px", 4)),
+            glow_ring_thickness_px=int(
+                data.get("detection", {}).get("glow_ring_thickness_px", 4)
+            ),
             glow_value_delta=int(data.get("detection", {}).get("glow_value_delta", 35)),
             glow_value_delta_by_slot=parsed_glow_delta_by_slot,
-            glow_saturation_min=int(data.get("detection", {}).get("glow_saturation_min", 80)),
-            glow_ring_fraction=float(data.get("detection", {}).get("glow_ring_fraction", 0.18)),
+            glow_saturation_min=int(
+                data.get("detection", {}).get("glow_saturation_min", 80)
+            ),
+            glow_ring_fraction=float(
+                data.get("detection", {}).get("glow_ring_fraction", 0.18)
+            ),
             glow_ring_fraction_by_slot=parsed_glow_ring_frac_by_slot,
             glow_red_ring_fraction=float(
                 data.get("detection", {}).get(
@@ -609,19 +814,35 @@ class AppConfig:
                 )
             ),
             glow_override_cooldown_by_slot=parsed_glow_override_slots,
-            glow_confirm_frames=int(data.get("detection", {}).get("glow_confirm_frames", 2)),
-            glow_yellow_hue_min=int(data.get("detection", {}).get("glow_yellow_hue_min", 18)),
-            glow_yellow_hue_max=int(data.get("detection", {}).get("glow_yellow_hue_max", 42)),
-            glow_red_hue_max_low=int(data.get("detection", {}).get("glow_red_hue_max_low", 12)),
-            glow_red_hue_min_high=int(data.get("detection", {}).get("glow_red_hue_min_high", 168)),
+            glow_confirm_frames=int(
+                data.get("detection", {}).get("glow_confirm_frames", 2)
+            ),
+            glow_yellow_hue_min=int(
+                data.get("detection", {}).get("glow_yellow_hue_min", 18)
+            ),
+            glow_yellow_hue_max=int(
+                data.get("detection", {}).get("glow_yellow_hue_max", 42)
+            ),
+            glow_red_hue_max_low=int(
+                data.get("detection", {}).get("glow_red_hue_max_low", 12)
+            ),
+            glow_red_hue_min_high=int(
+                data.get("detection", {}).get("glow_red_hue_min_high", 168)
+            ),
             ocr_enabled=data.get("detection", {}).get("ocr_enabled", True),
             overlay_enabled=data.get("overlay", {}).get("enabled", True),
             overlay_border_color=data.get("overlay", {}).get("border_color", "#00FF00"),
             show_active_screen_outline=data.get("overlay", {}).get("show_active_screen_outline", False),
             always_on_top=data.get("display", {}).get("always_on_top", False),
-            keybinds=cls._normalize_slot_keybinds(data.get("slots", {}).get("keybinds", [])),
+            keybinds=cls._normalize_slot_keybinds(
+                data.get("slots", {}).get("keybinds", [])
+            ),
             slot_display_names=data.get("slot_display_names", []),
             slot_baselines=data.get("slot_baselines", []),
+            slot_baselines_by_form=data.get("slot_baselines_by_form", {}),
+            forms=data.get("forms", [{"id": "normal", "name": "Normal"}]),
+            active_form_id=data.get("active_form_id", "normal"),
+            form_detector=data.get("form_detector", {}),
             overwritten_baseline_slots=data.get("overwritten_baseline_slots", []),
             buff_rois=cls._normalize_buff_rois(data.get("buff_rois", [])),
             priority_order=data.get("priority_order", []),
@@ -633,7 +854,11 @@ class AppConfig:
             target_window_title=data.get("target_window_title", ""),
             profile_name=data.get("profile_name", ""),
             history_rows=data.get("history_rows", 3),
-            queue_whitelist=[str(k).strip().lower() for k in data.get("queue_whitelist", []) if str(k).strip()],
+            queue_whitelist=[
+                str(k).strip().lower()
+                for k in data.get("queue_whitelist", [])
+                if str(k).strip()
+            ],
             queue_timeout_ms=int(data.get("queue_timeout_ms", 5000)),
             queue_fire_delay_ms=int(data.get("queue_fire_delay_ms", 100)),
         )
@@ -645,8 +870,14 @@ class AppConfig:
             )
         else:
             # Legacy migration path from single priority list + single hotkey.
-            legacy_toggle_bind = normalize_bind(str(data.get("automation_toggle_bind", "") or ""))
-            legacy_mode = (data.get("automation_hotkey_mode", "toggle") or "toggle").strip().lower()
+            legacy_toggle_bind = normalize_bind(
+                str(data.get("automation_toggle_bind", "") or "")
+            )
+            legacy_mode = (
+                (data.get("automation_hotkey_mode", "toggle") or "toggle")
+                .strip()
+                .lower()
+            )
             cfg.priority_profiles = [
                 {
                     "id": "default",
@@ -659,13 +890,18 @@ class AppConfig:
                             "activation_rule": "always",
                             "ready_source": "slot",
                             "buff_roi_id": "",
+                            "required_form": "",
                         }
                         for i in list(data.get("priority_order", []))
                         if isinstance(i, int)
                     ],
                     "manual_actions": [],
-                    "toggle_bind": legacy_toggle_bind if legacy_mode == "toggle" else "",
-                    "single_fire_bind": legacy_toggle_bind if legacy_mode == "single_fire" else "",
+                    "toggle_bind": (
+                        legacy_toggle_bind if legacy_mode == "toggle" else ""
+                    ),
+                    "single_fire_bind": (
+                        legacy_toggle_bind if legacy_mode == "single_fire" else ""
+                    ),
                 }
             ]
             cfg.active_priority_profile_id = "default"
@@ -699,6 +935,11 @@ class AppConfig:
                     str(int(k)): str(v)
                     for k, v in dict(self.detection_region_overrides or {}).items()
                 },
+                "cooldown_group_by_slot": {
+                    str(int(k)): str(v)
+                    for k, v in dict(self.cooldown_group_by_slot or {}).items()
+                    if str(v or "").strip()
+                },
                 "cast_detection_enabled": self.cast_detection_enabled,
                 "cast_candidate_min_fraction": self.cast_candidate_min_fraction,
                 "cast_candidate_max_fraction": self.cast_candidate_max_fraction,
@@ -717,12 +958,14 @@ class AppConfig:
                 "glow_ring_thickness_px": self.glow_ring_thickness_px,
                 "glow_value_delta": self.glow_value_delta,
                 "glow_value_delta_by_slot": {
-                    str(int(k)): int(v) for k, v in dict(self.glow_value_delta_by_slot or {}).items()
+                    str(int(k)): int(v)
+                    for k, v in dict(self.glow_value_delta_by_slot or {}).items()
                 },
                 "glow_saturation_min": self.glow_saturation_min,
                 "glow_ring_fraction": self.glow_ring_fraction,
                 "glow_ring_fraction_by_slot": {
-                    str(int(k)): float(v) for k, v in dict(self.glow_ring_fraction_by_slot or {}).items()
+                    str(int(k)): float(v)
+                    for k, v in dict(self.glow_ring_fraction_by_slot or {}).items()
                 },
                 "glow_red_ring_fraction": self.glow_red_ring_fraction,
                 "glow_override_cooldown_by_slot": [
@@ -742,6 +985,10 @@ class AppConfig:
             },
             "display": {"always_on_top": self.always_on_top},
             "slot_baselines": self.slot_baselines,
+            "slot_baselines_by_form": self.slot_baselines_by_form,
+            "forms": self.forms,
+            "active_form_id": self.active_form_id,
+            "form_detector": self.form_detector,
             "overwritten_baseline_slots": self.overwritten_baseline_slots,
             "buff_rois": self.buff_rois,
             "priority_order": self.priority_order,

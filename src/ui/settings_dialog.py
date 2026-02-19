@@ -364,6 +364,20 @@ class SettingsDialog(QDialog):
         change_ignore_row.addWidget(self._edit_cooldown_change_ignore_by_slot)
         change_ignore_row.addWidget(change_ignore_help)
         fl.addRow(_row_label("Change ignore:"), change_ignore_row)
+        self._edit_cooldown_group_by_slot = QLineEdit()
+        self._edit_cooldown_group_by_slot.setPlaceholderText("e.g. 0:builders, 1:builders")
+        self._edit_cooldown_group_by_slot.setToolTip(
+            "Optional cooldown-memory sharing groups as slot:group pairs (0-based)."
+        )
+        group_help = QLabel("(?)")
+        group_help.setObjectName("hint")
+        group_help.setToolTip(
+            "Slots in the same group share cooldown-memory smoothing across form switches."
+        )
+        group_row = QHBoxLayout()
+        group_row.addWidget(self._edit_cooldown_group_by_slot)
+        group_row.addWidget(group_help)
+        fl.addRow(_row_label("Cooldown groups:"), group_row)
         self._check_glow_enabled = QCheckBox("Enable glow ready override")
         self._check_glow_enabled.setToolTip(
             "If enabled, confirmed icon glow can mark a slot ready even when generic change-delta says not-ready."
@@ -647,6 +661,58 @@ class SettingsDialog(QDialog):
         buff_cal_row.addWidget(self._btn_clear_buff_templates)
         buff_cal_row.addWidget(self._buff_calibration_status, 1)
         fl.addRow(_row_label("Buff calib:"), buff_cal_row)
+        form_row = QHBoxLayout()
+        self._combo_form = QComboBox()
+        self._combo_form.setMinimumWidth(120)
+        self._btn_add_form = QPushButton("+")
+        self._btn_add_form.setFixedWidth(28)
+        self._btn_remove_form = QPushButton("-")
+        self._btn_remove_form.setObjectName("deleteButton")
+        self._btn_remove_form.setFixedWidth(28)
+        self._edit_form_name = QLineEdit()
+        self._edit_form_name.setPlaceholderText("Form name")
+        form_row.addWidget(self._combo_form)
+        form_row.addWidget(self._btn_add_form)
+        form_row.addWidget(self._btn_remove_form)
+        form_row.addWidget(self._edit_form_name, 1)
+        fl.addRow(_row_label("Forms:"), form_row)
+        form_active_row = QHBoxLayout()
+        self._combo_active_form = QComboBox()
+        self._combo_active_form.setMinimumWidth(120)
+        self._label_form_status = QLabel("normal")
+        self._label_form_status.setObjectName("hint")
+        form_active_row.addWidget(self._combo_active_form)
+        form_active_row.addWidget(self._label_form_status, 1)
+        fl.addRow(_row_label("Active form:"), form_active_row)
+        detector_row = QHBoxLayout()
+        self._combo_form_detector_type = QComboBox()
+        self._combo_form_detector_type.addItem("Off", "off")
+        self._combo_form_detector_type.addItem("Buff ROI", "buff_roi")
+        self._combo_form_detector_type.setMinimumWidth(90)
+        self._combo_form_detector_roi = QComboBox()
+        self._combo_form_detector_roi.setMinimumWidth(120)
+        detector_row.addWidget(self._combo_form_detector_type)
+        detector_row.addWidget(self._combo_form_detector_roi, 1)
+        fl.addRow(_row_label("Form detect:"), detector_row)
+        detector_map_row = QHBoxLayout()
+        self._combo_form_present = QComboBox()
+        self._combo_form_absent = QComboBox()
+        self._spin_form_confirm_frames = QSpinBox()
+        self._spin_form_confirm_frames.setRange(1, 10)
+        self._spin_form_confirm_frames.setPrefix("N ")
+        self._spin_form_confirm_frames.setMaximumWidth(62)
+        self._spin_form_settle_ms = QSpinBox()
+        self._spin_form_settle_ms.setRange(0, 1000)
+        self._spin_form_settle_ms.setSuffix(" ms")
+        self._spin_form_settle_ms.setMaximumWidth(86)
+        detector_map_row.addWidget(QLabel("present"))
+        detector_map_row.addWidget(self._combo_form_present)
+        detector_map_row.addWidget(QLabel("absent"))
+        detector_map_row.addWidget(self._combo_form_absent)
+        detector_map_row.addWidget(self._spin_form_confirm_frames)
+        detector_map_row.addWidget(self._spin_form_settle_ms)
+        detector_map_row.addStretch()
+        fl.addRow(_row_label("Detect map:"), detector_map_row)
         return w
 
     def _automation_controls_section(self) -> QWidget:
@@ -814,6 +880,7 @@ class SettingsDialog(QDialog):
         self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._slider_change_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._edit_cooldown_change_ignore_by_slot.editingFinished.connect(self._on_detection_changed)
+        self._edit_cooldown_group_by_slot.editingFinished.connect(self._on_detection_changed)
         self._check_glow_enabled.toggled.connect(self._on_detection_changed)
         self._spin_glow_ring_thickness.valueChanged.connect(self._on_detection_changed)
         self._spin_glow_value_delta.valueChanged.connect(self._on_detection_changed)
@@ -856,6 +923,17 @@ class SettingsDialog(QDialog):
         self._spin_buff_confirm_frames.valueChanged.connect(self._on_detection_changed)
         self._btn_calibrate_buff_present.clicked.connect(self._on_calibrate_buff_present_clicked)
         self._btn_clear_buff_templates.clicked.connect(self._on_clear_buff_templates_clicked)
+        self._combo_form.currentIndexChanged.connect(self._on_form_selected)
+        self._btn_add_form.clicked.connect(self._on_add_form)
+        self._btn_remove_form.clicked.connect(self._on_remove_form)
+        self._edit_form_name.textChanged.connect(self._on_detection_changed)
+        self._combo_active_form.currentIndexChanged.connect(self._on_detection_changed)
+        self._combo_form_detector_type.currentIndexChanged.connect(self._on_detection_changed)
+        self._combo_form_detector_roi.currentIndexChanged.connect(self._on_detection_changed)
+        self._combo_form_present.currentIndexChanged.connect(self._on_detection_changed)
+        self._combo_form_absent.currentIndexChanged.connect(self._on_detection_changed)
+        self._spin_form_confirm_frames.valueChanged.connect(self._on_detection_changed)
+        self._spin_form_settle_ms.valueChanged.connect(self._on_detection_changed)
         self._combo_automation_profile.currentIndexChanged.connect(self._on_automation_profile_selected)
         self._btn_add_automation_profile.clicked.connect(self._on_add_automation_profile)
         self._btn_copy_automation_profile.clicked.connect(self._on_copy_automation_profile)
@@ -922,6 +1000,7 @@ class SettingsDialog(QDialog):
         self._slider_change_pixel_fraction.blockSignals(True)
         self._combo_detection_region.blockSignals(True)
         self._edit_cooldown_change_ignore_by_slot.blockSignals(True)
+        self._edit_cooldown_group_by_slot.blockSignals(True)
         self._check_glow_enabled.blockSignals(True)
         self._spin_glow_ring_thickness.blockSignals(True)
         self._spin_glow_value_delta.blockSignals(True)
@@ -955,6 +1034,11 @@ class SettingsDialog(QDialog):
         self._edit_cooldown_change_ignore_by_slot.setText(
             self._format_slot_index_list(
                 getattr(self._config, "cooldown_change_ignore_by_slot", []) or []
+            )
+        )
+        self._edit_cooldown_group_by_slot.setText(
+            self._format_cooldown_group_by_slot(
+                getattr(self._config, "cooldown_group_by_slot", {}) or {}
             )
         )
         self._check_glow_enabled.setChecked(bool(getattr(self._config, "glow_enabled", True)))
@@ -1046,6 +1130,7 @@ class SettingsDialog(QDialog):
         self._slider_change_pixel_fraction.blockSignals(False)
         self._combo_detection_region.blockSignals(False)
         self._edit_cooldown_change_ignore_by_slot.blockSignals(False)
+        self._edit_cooldown_group_by_slot.blockSignals(False)
         self._check_glow_enabled.blockSignals(False)
         self._spin_glow_ring_thickness.blockSignals(False)
         self._spin_glow_value_delta.blockSignals(False)
@@ -1075,6 +1160,7 @@ class SettingsDialog(QDialog):
         self._spin_cast_bar_width.blockSignals(False)
         self._spin_cast_bar_height.blockSignals(False)
         self._spin_cast_bar_activity.blockSignals(False)
+        self._sync_form_controls()
         self._sync_buff_roi_controls()
         self._sync_automation_profile_controls()
         self._spin_min_delay.blockSignals(True)
@@ -1104,6 +1190,8 @@ class SettingsDialog(QDialog):
         self._spin_queue_fire_delay.blockSignals(True)
         self._spin_queue_fire_delay.setValue(getattr(self._config, "queue_fire_delay_ms", 100))
         self._spin_queue_fire_delay.blockSignals(False)
+        active_form = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower() or "normal"
+        self._btn_calibrate.setText(f"Calibrate Baselines ({active_form})")
         self._update_monitor_combo()
         self._update_status_bar()
 
@@ -1431,6 +1519,186 @@ class SettingsDialog(QDialog):
             parsed.add(slot_idx)
         return ", ".join(str(v) for v in sorted(parsed))
 
+    @staticmethod
+    def _parse_cooldown_group_by_slot(raw_text: str) -> dict[int, str]:
+        out: dict[int, str] = {}
+        for token in str(raw_text or "").split(","):
+            part = token.strip()
+            if not part or ":" not in part:
+                continue
+            left, right = part.split(":", 1)
+            try:
+                slot_idx = int(left.strip())
+            except Exception:
+                continue
+            group_id = str(right or "").strip().lower()
+            if slot_idx < 0 or not group_id:
+                continue
+            out[slot_idx] = group_id
+        return out
+
+    @staticmethod
+    def _format_cooldown_group_by_slot(values: dict) -> str:
+        parsed: list[tuple[int, str]] = []
+        for k, v in dict(values or {}).items():
+            try:
+                slot_idx = int(k)
+            except Exception:
+                continue
+            group_id = str(v or "").strip().lower()
+            if slot_idx < 0 or not group_id:
+                continue
+            parsed.append((slot_idx, group_id))
+        return ", ".join(f"{slot}:{gid}" for slot, gid in sorted(parsed, key=lambda t: t[0]))
+
+    def _selected_form_index(self) -> int:
+        idx = self._combo_form.currentIndex()
+        if idx < 0:
+            return -1
+        form_id = str(self._combo_form.itemData(idx) or "")
+        forms = list(getattr(self._config, "forms", []) or [])
+        for i, form in enumerate(forms):
+            if str(form.get("id", "") or "").strip().lower() == form_id:
+                return i
+        return -1
+
+    def _sync_form_controls(self) -> None:
+        forms = [dict(f) for f in list(getattr(self._config, "forms", []) or []) if isinstance(f, dict)]
+        if not any(str(f.get("id", "") or "").strip().lower() == "normal" for f in forms):
+            forms.insert(0, {"id": "normal", "name": "Normal"})
+            self._config.forms = forms
+
+        current_form_id = str(self._combo_form.currentData() or "")
+        current_active_id = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower()
+        self._combo_form.blockSignals(True)
+        self._combo_active_form.blockSignals(True)
+        self._combo_form_present.blockSignals(True)
+        self._combo_form_absent.blockSignals(True)
+        self._combo_form.clear()
+        self._combo_active_form.clear()
+        self._combo_form_present.clear()
+        self._combo_form_absent.clear()
+        for form in forms:
+            fid = str(form.get("id", "") or "").strip().lower()
+            if not fid:
+                continue
+            name = str(form.get("name", "") or "").strip() or fid.title()
+            self._combo_form.addItem(name, fid)
+            self._combo_active_form.addItem(name, fid)
+            self._combo_form_present.addItem(name, fid)
+            self._combo_form_absent.addItem(name, fid)
+        sel_idx = self._combo_form.findData(current_form_id)
+        if sel_idx < 0:
+            sel_idx = self._combo_form.findData(current_active_id)
+        if sel_idx < 0:
+            sel_idx = 0 if self._combo_form.count() > 0 else -1
+        self._combo_form.setCurrentIndex(sel_idx)
+        active_idx = self._combo_active_form.findData(current_active_id)
+        if active_idx < 0:
+            active_idx = 0 if self._combo_active_form.count() > 0 else -1
+        self._combo_active_form.setCurrentIndex(active_idx)
+
+        detector = getattr(self._config, "form_detector", {}) or {}
+        detector_type = str(detector.get("type", "off") or "off").strip().lower()
+        if detector_type not in ("off", "buff_roi"):
+            detector_type = "off"
+        type_idx = self._combo_form_detector_type.findData(detector_type)
+        if type_idx < 0:
+            type_idx = 0
+        self._combo_form_detector_type.blockSignals(True)
+        self._combo_form_detector_type.setCurrentIndex(type_idx)
+        self._combo_form_detector_type.blockSignals(False)
+
+        rois = [dict(r) for r in list(getattr(self._config, "buff_rois", []) or []) if isinstance(r, dict)]
+        self._combo_form_detector_roi.blockSignals(True)
+        current_roi = str(detector.get("roi_id", "") or "").strip().lower()
+        self._combo_form_detector_roi.clear()
+        self._combo_form_detector_roi.addItem("Select Buff ROI...", "")
+        for roi in rois:
+            rid = str(roi.get("id", "") or "").strip().lower()
+            if not rid:
+                continue
+            rname = str(roi.get("name", "") or "").strip() or rid
+            self._combo_form_detector_roi.addItem(rname, rid)
+        roi_idx = self._combo_form_detector_roi.findData(current_roi)
+        self._combo_form_detector_roi.setCurrentIndex(roi_idx if roi_idx >= 0 else 0)
+        self._combo_form_detector_roi.blockSignals(False)
+
+        present_form = str(detector.get("present_form", "normal") or "normal").strip().lower()
+        absent_form = str(detector.get("absent_form", "normal") or "normal").strip().lower()
+        p_idx = self._combo_form_present.findData(present_form)
+        a_idx = self._combo_form_absent.findData(absent_form)
+        self._combo_form_present.setCurrentIndex(p_idx if p_idx >= 0 else 0)
+        self._combo_form_absent.setCurrentIndex(a_idx if a_idx >= 0 else 0)
+        self._combo_form_present.blockSignals(False)
+        self._combo_form_absent.blockSignals(False)
+        self._combo_form.blockSignals(False)
+        self._combo_active_form.blockSignals(False)
+
+        selected_idx = self._selected_form_index()
+        can_edit = selected_idx >= 0
+        self._edit_form_name.setEnabled(can_edit)
+        self._btn_remove_form.setEnabled(can_edit and str(self._combo_form.currentData() or "") != "normal")
+        if selected_idx >= 0:
+            sel_form = forms[selected_idx]
+            self._edit_form_name.blockSignals(True)
+            self._edit_form_name.setText(str(sel_form.get("name", "") or "").strip())
+            self._edit_form_name.blockSignals(False)
+        else:
+            self._edit_form_name.blockSignals(True)
+            self._edit_form_name.setText("")
+            self._edit_form_name.blockSignals(False)
+        self._spin_form_confirm_frames.blockSignals(True)
+        self._spin_form_settle_ms.blockSignals(True)
+        self._spin_form_confirm_frames.setValue(int(detector.get("confirm_frames", 2) or 2))
+        self._spin_form_settle_ms.setValue(int(detector.get("settle_ms", 200) or 200))
+        self._spin_form_confirm_frames.blockSignals(False)
+        self._spin_form_settle_ms.blockSignals(False)
+        self._label_form_status.setText(
+            f"Current: {current_active_id}" if current_active_id else "Current: normal"
+        )
+
+    def _on_form_selected(self, _index: int) -> None:
+        self._sync_form_controls()
+
+    def _on_add_form(self) -> None:
+        forms = [dict(f) for f in list(getattr(self._config, "forms", []) or []) if isinstance(f, dict)]
+        existing = {str(f.get("id", "") or "").strip().lower() for f in forms}
+        i = 1
+        while f"form_{i}" in existing:
+            i += 1
+        fid = f"form_{i}"
+        forms.append({"id": fid, "name": f"Form {i}"})
+        self._config.forms = forms
+        self._sync_form_controls()
+        idx = self._combo_form.findData(fid)
+        if idx >= 0:
+            self._combo_form.setCurrentIndex(idx)
+            self._combo_active_form.setCurrentIndex(self._combo_active_form.findData(fid))
+        self._emit_config()
+
+    def _on_remove_form(self) -> None:
+        idx = self._selected_form_index()
+        if idx < 0:
+            return
+        forms = [dict(f) for f in list(getattr(self._config, "forms", []) or []) if isinstance(f, dict)]
+        fid = str(forms[idx].get("id", "") or "").strip().lower()
+        if fid == "normal":
+            return
+        forms = [f for f in forms if str(f.get("id", "") or "").strip().lower() != fid]
+        self._config.forms = forms
+        if str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower() == fid:
+            self._config.active_form_id = "normal"
+        # Clear detector mappings to removed form.
+        detector = getattr(self._config, "form_detector", {}) or {}
+        if str(detector.get("present_form", "") or "").strip().lower() == fid:
+            detector["present_form"] = "normal"
+        if str(detector.get("absent_form", "") or "").strip().lower() == fid:
+            detector["absent_form"] = "normal"
+        self._config.form_detector = detector
+        self._sync_form_controls()
+        self._emit_config()
+
     def _selected_buff_roi_index(self) -> int:
         idx = self._combo_buff_roi.currentIndex()
         if idx < 0:
@@ -1550,6 +1818,7 @@ class SettingsDialog(QDialog):
         )
         self._config.buff_rois = rois
         self._sync_buff_roi_controls()
+        self._sync_form_controls()
         idx = self._combo_buff_roi.findData(rid)
         if idx >= 0:
             self._combo_buff_roi.setCurrentIndex(idx)
@@ -1563,6 +1832,7 @@ class SettingsDialog(QDialog):
         del rois[idx]
         self._config.buff_rois = rois
         self._sync_buff_roi_controls()
+        self._sync_form_controls()
         self._emit_config()
 
     def _on_calibrate_buff_present_clicked(self) -> None:
@@ -1600,6 +1870,9 @@ class SettingsDialog(QDialog):
         self._change_pixel_fraction_label.setText(f"{self._config.cooldown_change_pixel_fraction:.2f}")
         self._config.cooldown_change_ignore_by_slot = self._parse_slot_index_list(
             self._edit_cooldown_change_ignore_by_slot.text()
+        )
+        self._config.cooldown_group_by_slot = self._parse_cooldown_group_by_slot(
+            self._edit_cooldown_group_by_slot.text()
         )
         self._config.glow_enabled = self._check_glow_enabled.isChecked()
         self._config.glow_ring_thickness_px = self._spin_glow_ring_thickness.value()
@@ -1672,6 +1945,40 @@ class SettingsDialog(QDialog):
             combo_idx = self._combo_buff_roi.currentIndex()
             if combo_idx >= 0:
                 self._combo_buff_roi.setItemText(combo_idx, str(roi["name"]))
+        form_idx = self._selected_form_index()
+        if form_idx >= 0 and form_idx < len(self._config.forms):
+            form = self._config.forms[form_idx]
+            form["name"] = (self._edit_form_name.text() or "").strip() or str(
+                form.get("id", "") or "Form"
+            )
+            combo_idx = self._combo_form.currentIndex()
+            if combo_idx >= 0:
+                self._combo_form.setItemText(combo_idx, str(form["name"]))
+            active_idx = self._combo_active_form.findData(str(form.get("id", "") or "").strip().lower())
+            if active_idx >= 0:
+                self._combo_active_form.setItemText(active_idx, str(form["name"]))
+            present_idx = self._combo_form_present.findData(str(form.get("id", "") or "").strip().lower())
+            if present_idx >= 0:
+                self._combo_form_present.setItemText(present_idx, str(form["name"]))
+            absent_idx = self._combo_form_absent.findData(str(form.get("id", "") or "").strip().lower())
+            if absent_idx >= 0:
+                self._combo_form_absent.setItemText(absent_idx, str(form["name"]))
+        self._config.active_form_id = str(self._combo_active_form.currentData() or "normal").strip().lower() or "normal"
+        detector_type = str(self._combo_form_detector_type.currentData() or "off").strip().lower()
+        if detector_type == "buff_roi":
+            self._config.form_detector = {
+                "type": "buff_roi",
+                "roi_id": str(self._combo_form_detector_roi.currentData() or "").strip().lower(),
+                "present_form": str(self._combo_form_present.currentData() or "normal").strip().lower() or "normal",
+                "absent_form": str(self._combo_form_absent.currentData() or "normal").strip().lower() or "normal",
+                "confirm_frames": int(self._spin_form_confirm_frames.value()),
+                "settle_ms": int(self._spin_form_settle_ms.value()),
+            }
+        else:
+            self._config.form_detector = {}
+        active_form = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower() or "normal"
+        self._label_form_status.setText(f"Current: {active_form}")
+        self._btn_calibrate.setText(f"Calibrate Baselines ({active_form})")
         self._emit_config()
 
     def _start_rebind_capture(self, target: str, button: QPushButton) -> None:
