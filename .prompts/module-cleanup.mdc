@@ -1,0 +1,452 @@
+# Module System Cleanup: Remove Hardcoded cooldown_rotation References
+
+## Context
+
+The module system infrastructure (Core, BaseModule, ModuleManager) is solid and correct. The CooldownRotationModule exists in `modules/cooldown_rotation/` with proper lifecycle, signals, services, and extension points. But the migration is half-done: `main.py` and `main_window.py` are riddled with direct `"cooldown_rotation"` references, dead code, and debug logging from a previous debugging session. This cleanup makes the app shell module-agnostic so a second module could be added without touching main.py or main_window.py.
+
+**Rule: After this cleanup, the strings `"cooldown_rotation"`, `cooldown_module`, `_cooldown_config`, and `_cooldown_status_widget` should not appear anywhere in `main.py` or `main_window.py`.** All module interaction goes through ModuleManager, Core services, or hooks.
+
+---
+
+## 1. Delete Dead Code
+
+### main.py
+
+- **Delete the old `CaptureWorker` class** (lines ~79-266). Only `ModuleCaptureWorker` is used. Remove the entire class.
+- **Delete `load_config()` function** (~lines 399-407). It loads the old flat config format and is unused — ConfigManager handles loading now.
+- **Delete ALL `#region agent log` blocks** throughout `main.py`. Search for `debug-6d0385`, `agent log`, `#region agent`, `_f.write(json.dumps({"sessionId"` and remove every one of these debugging blocks. There are at least 3 in main.py.
+
+### main_window.py
+
+- **Delete ALL `#region agent log` blocks** — there are at least 2 (in `_cooldown_status_widget` and `update_preview`). Remove them entirely including the `_dbg_h2_logged` / `_dbg_h4_count` tracking attributes.
+
+---
+
+## 2. Move Calibration Into the Module
+
+Calibration logic in main.py (`calibrate_baselines`, `calibrate_buff_roi_present`, `calibrate_single_slot`, `encode_baselines`, `decode_baselines`, `encode_gray_template`, `sync_baselines_to_config`) is all cooldown_rotation-specific. Move it into the module.
+
+### Add to CooldownRotationModule (`modules/cooldown_rotation/module.py`):
+
+```python
+def calibrate_all_baselines(self) -> tuple[bool, str]:
+    """Calibrate all slot baselines from a fresh screen capture. Returns (success, message)."""
+    # Move logic from main.py calibrate_baselines here.
+    # Use self.core.get_config("core") for monitor_index and bounding_box.
+    # Use self._analyzer for calibrate_baselines() and get_baselines().
+    # Call self._sync_baselines_to_config() after success.
+    # Return (True, "Calibrated ✓") or (False, "error message")
+
+def calibrate_single_slot(self, slot_index: int) -> tuple[bool, str]:
+    """Calibrate one slot baseline. Returns (success, message)."""
+    # Move logic from main.py calibrate_single_slot here.
+
+def calibrate_buff_roi_present(self, roi_id: str) -> tuple[bool, str]:
+    """Calibrate a buff ROI present template. Returns (success, message)."""
+    # Move logic from main.py calibrate_buff_roi_present here.
+
+def _sync_baselines_to_config(self) -> None:
+    """Encode current analyzer baselines into config."""
+    # Move sync_baselines_to_config logic here.
+
+@staticmethod
+def _encode_baselines(baselines: dict) -> list[dict]:
+    """Encode baselines for JSON serialization."""
+    # Move encode_baselines here.
+
+@staticmethod
+def _decode_baselines(data: list[dict]) -> dict:
+    """Decode baselines from JSON config."""
+    # Move decode_baselines here.
+
+@staticmethod
+def _encode_gray_template(gray) -> dict:
+    """Encode a grayscale template for JSON."""
+    # Move encode_gray_template here.
+```
+
+Also move the post-load baseline restore into the module's `ready()`:
+
+```python
+def ready(self) -> None:
+    """Load saved baselines from config after setup."""
+    if self._analyzer is None or self.core is None:
+        return
+    cr_cfg = self.core.get_config(self.key)
+    saved = cr_cfg.get("slot_baselines")
+    if saved:
+        try:
+            decoded = self._decode_baselines(saved)
+            if decoded:
+                self._analyzer.set_baselines(decoded)
+        except Exception as e:
+            logger.warning("Could not load saved baselines: %s", e)
+```
+
+### Update main.py:
+
+- Delete `encode_baselines`, `decode_baselines`, `encode_gray_template` functions.
+- Delete `sync_baselines_to_config` closure and `set_before_save_callback` call.
+- Delete `calibrate_baselines`, `calibrate_buff_roi_present`, `calibrate_single_slot` closures.
+- Delete the post-load baseline restore block that reads `cr_cfg["slot_baselines"]`.
+- The settings dialog's `calibrate_requested` signal should now call the module:
+
+```python
+# In main.py, replace calibrate wiring with:
+settings_dialog.calibrate_requested.connect(
+    lambda btn: _module_calibrate(module_manager, "calibrate_all_baselines", btn, window)
+)
+settings_dialog.calibrate_buff_present_requested.connect(
+    lambda roi_id: _module_calibrate_buff(module_manager, roi_id, window, settings_dialog)
+)
+window.calibrate_slot_requested.connect(
+    lambda idx: _module_calibrate_slot(module_manager, idx, window)
+)
+```
+
+Write small generic helper functions that call through module_manager:
+
+```python
+def _module_calibrate(mm, method_name, btn, window):
+    """Call a calibration method on the first module that has it."""
+    for key in mm._load_order:
+        mod = mm.modules.get(key)
+        if mod and hasattr(mod, method_name):
+            ok, msg = getattr(mod, method_name)()
+            btn.setText(msg if ok else f"Failed: {msg}")
+            QTimer.singleShot(2000, lambda: btn.setText("Calibrate All Baselines"))
+            if ok:
+                window.clear_overwritten_baseline_slots()
+            return
+```
+
+This way main.py doesn't know which module provides calibration — it just finds whichever module offers the method.
+
+---
+
+## 3. Make Hotkey Wiring Module-Agnostic
+
+Current `all_profile_binds()` and `on_hotkey_triggered()` in main.py directly read `core.get_config("cooldown_rotation")`.
+
+### Add to BaseModule or CooldownRotationModule:
+
+```python
+# In CooldownRotationModule:
+def get_hotkey_binds(self) -> list[dict]:
+    """Return list of hotkey definitions this module wants registered.
+    Each dict: {"bind": "f24", "action": "toggle"|"single_fire", "profile_id": "...", "profile_name": "..."}
+    """
+    cr = self.core.get_config(self.key)
+    result = []
+    for p in (cr.get("priority_profiles") or []):
+        pid = str(p.get("id", "") or "").strip()
+        pname = str(p.get("name", "") or "").strip() or "Profile"
+        toggle = normalize_bind(str(p.get("toggle_bind", "") or ""))
+        single = normalize_bind(str(p.get("single_fire_bind", "") or ""))
+        if toggle:
+            result.append({"bind": toggle, "action": "toggle", "profile_id": pid, "profile_name": pname})
+        if single:
+            result.append({"bind": single, "action": "single_fire", "profile_id": pid, "profile_name": pname})
+    return result
+
+def handle_hotkey(self, bind_info: dict) -> None:
+    """Handle a triggered hotkey. bind_info is one of the dicts from get_hotkey_binds()."""
+    action = bind_info.get("action")
+    profile_id = bind_info.get("profile_id", "")
+    # Switch to the profile if not already active
+    cr = self.core.get_config(self.key)
+    active_id = (cr.get("active_priority_profile_id") or "").strip().lower()
+    if profile_id.strip().lower() != active_id:
+        cr = dict(cr)
+        cr["active_priority_profile_id"] = profile_id
+        self.core.save_config(self.key, cr)
+    if action == "single_fire":
+        key_sender = self.core.get_key_sender()
+        if key_sender and hasattr(key_sender, "request_single_fire"):
+            key_sender.request_single_fire()
+    elif action == "toggle":
+        self.toggle_rotation()
+```
+
+### Rewrite main.py hotkey section:
+
+```python
+def all_profile_binds() -> list[str]:
+    binds = []
+    for key in module_manager._load_order:
+        mod = module_manager.modules.get(key)
+        if mod and hasattr(mod, "get_hotkey_binds"):
+            for b in mod.get_hotkey_binds():
+                if b.get("bind"):
+                    binds.append(b["bind"])
+    return binds
+
+def on_hotkey_triggered(triggered_bind: str):
+    bind = normalize_bind(triggered_bind or "")
+    if not bind:
+        return
+    for key in module_manager._load_order:
+        mod = module_manager.modules.get(key)
+        if not mod or not hasattr(mod, "get_hotkey_binds"):
+            continue
+        for b in mod.get_hotkey_binds():
+            if b.get("bind") == bind:
+                mod.handle_hotkey(b)
+                # Refresh window UI after hotkey action
+                window.refresh_from_config()
+                name = b.get("profile_name", "Profile")
+                action = b.get("action", "")
+                if action == "single_fire":
+                    window.show_status_message(f"Single-fire armed ({name})", 1200)
+                elif action == "toggle":
+                    window.show_status_message(f"Toggled: {name}", 1200)
+                return
+```
+
+Now main.py doesn't know about cooldown_rotation profiles — it just asks each module for its hotkey binds and dispatches.
+
+---
+
+## 4. Make main_window.py Module-Agnostic
+
+### Replace `_cooldown_status_widget()`
+
+Currently returns the first status widget and is called from ~15 methods. Replace with a cleaner pattern:
+
+```python
+def _first_status_widget(self) -> Optional[QWidget]:
+    """Get the first module status widget. Cached after first call."""
+    if not hasattr(self, "_cached_status_widget"):
+        widgets = list(self._module_manager.get_status_widgets())
+        self._cached_status_widget = widgets[0][1] if widgets else None
+    return self._cached_status_widget
+```
+
+Rename all `_cooldown_status_widget()` calls to `_first_status_widget()`. The method is already generic (it returns the first widget) — it's just badly named.
+
+### Replace `_cooldown_config()`
+
+This method is used for: profile switching, bind display, automation state, priority order, manual actions, slot recalibration tracking.
+
+**These are all module concerns, not window concerns.** The methods that use `_cooldown_config()` fall into two categories:
+
+**A. Profile/bind/automation methods that belong on the module or should use services:**
+
+Replace these methods to use a generic "active automation module" pattern:
+
+```python
+def _get_automation_module(self) -> Optional[BaseModule]:
+    """Get the first module that provides automation (has toggle_rotation, get_hotkey_binds, etc.)."""
+    for key in self._module_manager._load_order:
+        mod = self._module_manager.modules.get(key)
+        if mod and hasattr(mod, "toggle_rotation"):
+            return mod
+    return None
+```
+
+Then:
+- `_on_automation_toggle_clicked` / `toggle_automation`: call `self._get_automation_module().toggle_rotation()` instead of `self._module_manager.get("cooldown_rotation").toggle_rotation()`
+- `_update_automation_button_text`: call `mod = self._get_automation_module()`, check `mod._is_active`
+- `_update_bind_display`: get bind info from `mod.get_hotkey_binds()` instead of reading config directly
+- `set_active_priority_profile`: move to the module. Main window should call `mod.set_active_priority_profile(pid)` — add this method to CooldownRotationModule if not present.
+
+**B. Config-writing methods that should move to the module:**
+
+- `mark_slot_recalibrated` / `clear_overwritten_baseline_slots`: These write to cooldown_rotation config. Move the logic into CooldownRotationModule methods and have the window call through the module.
+
+### Delete all the empty stubs
+
+There are ~25 methods in main_window.py that are just `pass  # Handled by cooldown_rotation status widget`. Delete them entirely:
+
+```python
+# DELETE ALL OF THESE:
+_set_priority_list_from_active_profile
+_on_priority_items_changed
+_on_priority_drop_remove
+_show_slot_menu
+_rename_slot
+_find_manual_action
+_on_add_manual_action
+_on_rename_manual_action
+_on_rebind_manual_action
+_on_remove_manual_action
+_start_listening_for_key
+_cancel_listening
+_update_next_intention_time
+_apply_slot_button_style
+_next_priority_candidate
+_next_casting_priority_slot
+_next_ready_priority_slot
+_prepopulate_slot_buttons
+_maybe_auto_save
+set_key_sender
+set_queue_listener
+```
+
+These are dead code — they were the old main_window implementations before status widget delegation. Nothing calls them except possibly the old CaptureWorker (which we're deleting). If anything does call them, move the call to the status widget instead.
+
+Also delete `_active_priority_profile`, `_active_priority_order`, `_active_priority_items`, `_active_manual_actions`, `_slot_order_from_priority_items` — these are all cooldown-specific profile parsing that now lives in the module's status widget or the module itself.
+
+### Simplify delegation methods
+
+The remaining delegation methods (`update_preview`, `update_slot_states`, `update_buff_states`, `record_last_action_sent`, `set_next_intention_blocked`, `set_next_intention_casting_wait`, `set_queued_override`, `set_capture_running`, `mark_slots_recalibrated`) all follow the same pattern:
+
+```python
+def update_preview(self, qimg):
+    w = self._first_status_widget()
+    if w and hasattr(w, "update_preview"):
+        w.update_preview(qimg)
+```
+
+This is fine and generic. Just rename `_cooldown_status_widget` to `_first_status_widget` in all of them.
+
+---
+
+## 5. Make on_config_updated Module-Agnostic
+
+Current `on_config_updated` in main.py directly calls `cooldown_module.update_analyzer_config()`. Instead:
+
+```python
+def on_config_updated(_root) -> None:
+    # Update core services
+    cfg = AppConfig.from_dict(flatten_config(
+        (_root or {}).get("core") or {},
+        (_root or {}).get("cooldown_rotation") or {}  # TEMPORARY: flatten still needs both
+    ))
+    key_sender.update_config(cfg)
+    
+    # Notify all modules
+    for key in module_manager._load_order:
+        mod = module_manager.modules.get(key)
+        if mod and hasattr(mod, "update_analyzer_config"):
+            mod.update_analyzer_config()
+    
+    # Update overlay from core config
+    c_cfg = (_root or {}).get("core") or {}
+    # ... overlay updates stay the same, they read core config ...
+    
+    window.refresh_from_config()
+```
+
+**Note on flatten_config**: Yes, `flatten_config(core_cfg, cr_cfg)` still hardcodes two namespaces. This is acceptable tech debt for now — AppConfig is the bridge that lets SlotAnalyzer and KeySender work without being rewritten. Flag it with a `# TODO: Phase 2 — eliminate AppConfig and flatten_config` comment. Don't try to fix it in this PR.
+
+---
+
+## 6. Make Signal Wiring Generic
+
+Current main.py:
+
+```python
+if cooldown_module is not None:
+    cooldown_module.slot_states_updated_signal.connect(window.update_slot_states, ...)
+    cooldown_module.buff_state_updated_signal.connect(window.update_buff_states, ...)
+    # ... etc
+```
+
+Replace with a generic loop:
+
+```python
+# Wire module signals to window and overlay
+for key in module_manager._load_order:
+    mod = module_manager.modules.get(key)
+    if mod is None:
+        continue
+    # Slot states -> window + overlay
+    if hasattr(mod, "slot_states_updated_signal"):
+        mod.slot_states_updated_signal.connect(window.update_slot_states, Qt.ConnectionType.QueuedConnection)
+        mod.slot_states_updated_signal.connect(overlay.update_slot_states, Qt.ConnectionType.QueuedConnection)
+    # Buff states -> window + overlay
+    if hasattr(mod, "buff_state_updated_signal"):
+        mod.buff_state_updated_signal.connect(window.update_buff_states, Qt.ConnectionType.QueuedConnection)
+        mod.buff_state_updated_signal.connect(overlay.update_buff_states, Qt.ConnectionType.QueuedConnection)
+    # Cast bar debug -> window
+    if hasattr(mod, "cast_bar_debug_signal"):
+        mod.cast_bar_debug_signal.connect(window.update_cast_bar_debug, Qt.ConnectionType.QueuedConnection)
+    # Key action -> handler
+    if hasattr(mod, "key_action_signal"):
+        mod.key_action_signal.connect(
+            lambda result, m=mod: _on_key_action(result, window, core),
+            Qt.ConnectionType.QueuedConnection,
+        )
+    # Queue listener -> window
+    if hasattr(mod, "get_queue_listener"):
+        ql = mod.get_queue_listener()
+        if ql and hasattr(ql, "queue_updated"):
+            ql.queue_updated.connect(window.set_queued_override, Qt.ConnectionType.QueuedConnection)
+```
+
+Now adding a second module with the same signal names automatically wires it up.
+
+---
+
+## 7. Clean Up _on_key_action
+
+This function reads `slot_display_names` from a flattened AppConfig. It should get display names from the module that sent the action:
+
+```python
+def _on_key_action(result: dict, win, c) -> None:
+    display_name = str(result.get("display_name", "") or "").strip() or "Unidentified"
+    # Module should include display_name in the result dict.
+    # If it doesn't, try to resolve from the module's config.
+    if display_name == "Unidentified":
+        slot_index = result.get("slot_index")
+        module_key = result.get("module_key")  # Module should tag its results
+        if module_key and slot_index is not None:
+            mod_cfg = c.get_config(module_key)
+            names = mod_cfg.get("slot_display_names") or []
+            if slot_index < len(names) and (names[slot_index] or "").strip():
+                display_name = names[slot_index].strip()
+    if result.get("action") == "sent":
+        win.record_last_action_sent(result["keybind"], result.get("timestamp", 0.0), display_name)
+    elif result.get("action") == "blocked" and result.get("reason") == "window":
+        win.set_next_intention_blocked(result["keybind"], display_name)
+    elif result.get("action") == "blocked" and result.get("reason") == "casting":
+        win.set_next_intention_casting_wait(slot_index=result.get("slot_index"), cast_ends_at=result.get("cast_ends_at"))
+```
+
+Update `CooldownRotationModule.on_frame()` to include `"module_key": self.key` in the result dict emitted via `key_action_signal`.
+
+---
+
+## Implementation Order
+
+1. **Delete dead code first** (old CaptureWorker, load_config, all agent log blocks). Easiest wins, biggest line count reduction.
+2. **Move calibration into module** + update `ready()` for baseline loading.
+3. **Move hotkey logic to module** (get_hotkey_binds, handle_hotkey) + rewrite main.py wiring.
+4. **Clean main_window.py**: delete stubs, rename `_cooldown_status_widget` → `_first_status_widget`, delete `_cooldown_config` and all methods that used it, replace with module delegation.
+5. **Make signal wiring generic** in main.py.
+6. **Clean on_config_updated** to loop modules.
+7. **Test**: App should behave identically. Run through: start capture, toggle automation with F24, calibrate baselines, change settings, verify overlay updates.
+
+---
+
+## What NOT to Change
+
+- **AppConfig bridge**: `_get_app_config()` in the module flattening namespaced config back to AppConfig is ugly but functional. Don't remove it — SlotAnalyzer and KeySender depend on AppConfig. This is Phase 2 tech debt. Add a TODO comment.
+- **flatten_config**: Same — it hardcodes "core" + "cooldown_rotation". Add a TODO, don't fix it now.
+- **SlotAnalyzer / KeySender internals**: They work. Don't refactor them.
+- **Status widget / Settings widget**: They're already in the module folder and work. Don't reorganize them.
+- **Core infrastructure** (Core, BaseModule, ModuleManager): These are clean. Don't touch them.
+
+---
+
+## Verification Checklist
+
+After cleanup, grep the codebase:
+
+```bash
+# These should return NO results in main.py or main_window.py:
+grep -n "cooldown_rotation" src/main.py src/ui/main_window.py
+grep -n "cooldown_module" src/main.py
+grep -n "_cooldown_config\|_cooldown_status" src/ui/main_window.py
+
+# These are acceptable (in modules/ and core/config_migration.py only):
+grep -rn "cooldown_rotation" modules/ src/core/config_migration.py
+```
+
+The strings "cooldown_rotation" should ONLY appear in:
+- `modules/cooldown_rotation/` (the module itself)
+- `src/core/config_migration.py` (migration knows the default module)
+- Config files
+
+NOT in main.py, main_window.py, or settings_dialog.py.

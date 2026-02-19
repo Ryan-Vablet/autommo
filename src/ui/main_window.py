@@ -39,8 +39,6 @@ from src.automation.global_hotkey import format_bind_for_display
 from src.automation.binds import normalize_bind, normalize_bind_from_parts
 from src.automation.priority_rules import (
     manual_item_is_eligible,
-    normalize_activation_rule,
-    normalize_ready_source,
     slot_item_is_eligible_for_state_dict,
 )
 
@@ -445,115 +443,29 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         pass  # Start/Settings/automation connected by main; module widgets own their signals
 
-    def _cooldown_status_widget(self) -> Optional[QWidget]:
-        """First status widget (cooldown_rotation) for delegation. Main can also get from module_manager.get_status_widgets()."""
-        widgets = list(self._module_manager.get_status_widgets())
-        # #region agent log (log once per widget list state: empty vs first type)
-        if not hasattr(self, "_dbg_h2_logged"):
-            self._dbg_h2_logged = True
-            try:
-                import json, time
-                from pathlib import Path
-                _logpath = Path(__file__).resolve().parent.parent.parent / "debug-6d0385.log"
-                with open(_logpath, "a") as _f:
-                    _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H2", "location": "main_window.py:_cooldown_status_widget", "message": "get_status_widgets result (first call)", "data": {"count": len(widgets), "first_type": type(widgets[0][1]).__name__ if widgets else None, "has_update_preview": hasattr(widgets[0][1], "update_preview") if widgets else None}, "timestamp": int(time.time() * 1000)}) + "\n")
-            except Exception:
-                pass
-        # #endregion
-        for name, widget in widgets:
-            return widget
+    def _first_status_widget(self) -> Optional[QWidget]:
+        """Get the first module status widget. Cached after first call."""
+        if not hasattr(self, "_cached_status_widget"):
+            widgets = list(self._module_manager.get_status_widgets())
+            self._cached_status_widget = widgets[0][1] if widgets else None
+        return self._cached_status_widget
+
+    def _get_automation_module(self) -> Optional[Any]:
+        """Get the first module that provides automation (has toggle_rotation, etc.)."""
+        for key in self._module_manager._load_order:
+            mod = self._module_manager.modules.get(key)
+            if mod and hasattr(mod, "toggle_rotation"):
+                return mod
         return None
-
-    def _cooldown_config(self) -> dict:
-        """Cooldown rotation config slice."""
-        return self._core.get_config("cooldown_rotation")
-
-    def _active_priority_profile(self) -> dict:
-        """Active automation profile from cooldown_rotation config."""
-        cfg = self._cooldown_config()
-        profiles = cfg.get("priority_profiles") or []
-        active_id = (cfg.get("active_priority_profile_id") or "").strip().lower()
-        for p in profiles:
-            if isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == active_id):
-                return dict(p)
-        return dict(profiles[0]) if profiles else {}
-
-    def _active_priority_order(self) -> list[int]:
-        return list(self._active_priority_profile().get("priority_order", []))
-
-    def _active_priority_items(self) -> list[dict]:
-        profile = self._active_priority_profile()
-        items = profile.get("priority_items", [])
-        if isinstance(items, list) and items:
-            normalized: list[dict] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                out = dict(item)
-                if str(out.get("type", "") or "").strip().lower() == "slot":
-                    out["activation_rule"] = normalize_activation_rule(
-                        out.get("activation_rule")
-                    )
-                    out["ready_source"] = normalize_ready_source(
-                        out.get("ready_source"), "slot"
-                    )
-                    out["buff_roi_id"] = str(
-                        out.get("buff_roi_id", "") or ""
-                    ).strip().lower()
-                elif str(out.get("type", "") or "").strip().lower() == "manual":
-                    out["ready_source"] = normalize_ready_source(
-                        out.get("ready_source"), "manual"
-                    )
-                    out["buff_roi_id"] = str(
-                        out.get("buff_roi_id", "") or ""
-                    ).strip().lower()
-                normalized.append(out)
-            return normalized
-        return [
-            {"type": "slot", "slot_index": i, "activation_rule": "always"}
-            for i in self._active_priority_order()
-        ]
-
-    def _active_manual_actions(self) -> list[dict]:
-        profile = self._active_priority_profile()
-        actions = profile.get("manual_actions", [])
-        if not isinstance(actions, list):
-            actions = []
-            profile["manual_actions"] = actions
-        return [a for a in actions if isinstance(a, dict)]
-
-    @staticmethod
-    def _slot_order_from_priority_items(items: list[dict]) -> list[int]:
-        return [
-            int(i["slot_index"])
-            for i in list(items or [])
-            if isinstance(i, dict)
-            and str(i.get("type", "") or "").strip().lower() == "slot"
-            and isinstance(i.get("slot_index"), int)
-        ]
-
-    def _set_priority_list_from_active_profile(self) -> None:
-        pass  # Handled by cooldown_rotation status widget
 
     def set_active_priority_profile(
         self, profile_id: str, persist: bool = False
     ) -> None:
-        cfg = self._cooldown_config()
-        pid = (profile_id or "").strip().lower()
-        if not pid:
-            return
-        profiles = cfg.get("priority_profiles") or []
-        if not any(isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == pid) for p in profiles):
-            return
-        cfg = dict(cfg)
-        cfg["active_priority_profile_id"] = pid
-        self._core.save_config("cooldown_rotation", cfg)
-        profile_name = "Default"
-        for p in profiles:
-            if isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == pid):
-                profile_name = (str(p.get("name", "") or "").strip()) or "Default"
-                break
-        self._profile_status_label.setText(f"Automation: {profile_name}")
+        mod = self._get_automation_module()
+        if mod and hasattr(mod, "set_active_priority_profile"):
+            mod.set_active_priority_profile(profile_id)
+        disp = mod.get_active_profile_display() if mod and hasattr(mod, "get_active_profile_display") else {}
+        self._profile_status_label.setText(f"Automation: {disp.get('profile_name', 'Default')}")
         self._update_bind_display()
         if persist:
             self.config_updated.emit(self._core.get_root_config())
@@ -561,12 +473,16 @@ class MainWindow(QMainWindow):
     def _refresh_from_core(self) -> None:
         """Set UI from core: profile label, bind display, automation button, GCD; refresh module status widgets."""
         self._update_automation_button_text()
-        profile_name = (
-            str(self._active_priority_profile().get("name", "") or "").strip()
-            or "Default"
-        )
-        self._profile_status_label.setText(f"Automation: {profile_name}")
-        gcd = self._core.get_service("cooldown_rotation", "gcd_estimate")
+        mod = self._get_automation_module()
+        disp = mod.get_active_profile_display() if mod and hasattr(mod, "get_active_profile_display") else {}
+        self._profile_status_label.setText(f"Automation: {disp.get('profile_name', 'Default')}")
+        gcd = None
+        for key in self._module_manager._load_order:
+            m = self._module_manager.modules.get(key)
+            if m and hasattr(m, "get_service_value"):
+                gcd = m.get_service_value("gcd_estimate")
+                if gcd is not None:
+                    break
         if gcd is not None and isinstance(gcd, (int, float)):
             self._gcd_label.setText(f"Est. GCD: {float(gcd):.2f}s")
         else:
@@ -579,16 +495,9 @@ class MainWindow(QMainWindow):
         """Called when config is updated from Settings dialog."""
         self._refresh_from_core()
 
-    def _maybe_auto_save(self) -> None:
-        pass  # Config persisted via Core/settings dialog
-
-    def _prepopulate_slot_buttons(self) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
     def _update_automation_button_text(self) -> None:
         """Set toggle button to Enabled/Disabled (green/gray) and bind display to Toggle: [key]."""
-        mod = self._module_manager.get("cooldown_rotation")
-        # Use automation state (_is_active), not module.enabled (module load flag)
+        mod = self._get_automation_module()
         enabled = getattr(mod, "_is_active", getattr(mod, "enabled", True)) if mod else False
         self._btn_automation_toggle.setProperty(
             "enabled", "true" if enabled else "false"
@@ -599,13 +508,16 @@ class MainWindow(QMainWindow):
         self._update_bind_display()
 
     def _update_bind_display(self) -> None:
-        profile = self._active_priority_profile()
-        toggle_bind = str(profile.get("toggle_bind", "") or "").strip()
-        single_fire_bind = str(profile.get("single_fire_bind", "") or "").strip()
+        mod = self._get_automation_module()
+        if not mod or not hasattr(mod, "get_active_profile_display"):
+            self._bind_display.setTextFormat(Qt.TextFormat.RichText)
+            self._bind_display.setText("Toggle: — | Single: —")
+            return
+        disp = mod.get_active_profile_display()
+        toggle_bind = (disp.get("toggle_bind") or "").strip()
+        single_fire_bind = (disp.get("single_fire_bind") or "").strip()
         display_toggle = format_bind_for_display(toggle_bind) if toggle_bind else "—"
-        display_single = (
-            format_bind_for_display(single_fire_bind) if single_fire_bind else "—"
-        )
+        display_single = format_bind_for_display(single_fire_bind) if single_fire_bind else "—"
         self._bind_display.setTextFormat(Qt.TextFormat.RichText)
         self._bind_display.setText(
             f"Toggle: <span style='color:{KEY_CYAN}'>{display_toggle}</span>"
@@ -613,7 +525,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_automation_toggle_clicked(self) -> None:
-        mod = self._module_manager.get("cooldown_rotation")
+        mod = self._get_automation_module()
         if mod:
             mod.toggle_rotation()
         self._update_automation_button_text()
@@ -621,21 +533,11 @@ class MainWindow(QMainWindow):
 
     def toggle_automation(self) -> None:
         """Toggle automation on/off (e.g. from global hotkey)."""
-        mod = self._module_manager.get("cooldown_rotation")
+        mod = self._get_automation_module()
         if mod:
             mod.toggle_rotation()
         self._update_automation_button_text()
         self.config_updated.emit(self._core.get_root_config())
-
-    def refresh_from_config(self) -> None:
-        """Refresh UI from core config (e.g. after import in settings)."""
-        self._refresh_from_core()
-
-    def set_key_sender(self, key_sender: Optional["KeySender"]) -> None:
-        pass  # Key sender from core
-
-    def _on_priority_items_changed(self, items: list) -> None:
-        pass  # Handled by cooldown_rotation status widget
 
     def _on_gcd_updated(self, gcd_seconds: float) -> None:
         self._gcd_label.setText(f"Est. GCD: {gcd_seconds:.2f}s")
@@ -643,115 +545,51 @@ class MainWindow(QMainWindow):
     def record_last_action_sent(
         self, keybind: str, timestamp: float, display_name: str = "Unidentified"
     ) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "record_last_action_sent"):
             w.record_last_action_sent(keybind, timestamp, display_name)
 
     def set_next_intention_blocked(
         self, keybind: str, display_name: str = "Unidentified"
     ) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "set_next_intention_blocked"):
             w.set_next_intention_blocked(keybind, display_name)
 
     def set_queued_override(self, q: Optional[dict]) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "set_queued_override"):
             w.set_queued_override(q)
-
-    def set_queue_listener(self, listener: Optional[object]) -> None:
-        pass  # Module owns queue listener
 
     def set_next_intention_casting_wait(
         self,
         slot_index: Optional[int],
         cast_ends_at: Optional[float],
     ) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "set_next_intention_casting_wait"):
             w.set_next_intention_casting_wait(slot_index, cast_ends_at)
 
     def _on_priority_drop_remove(self, item_key: str) -> None:
-        pass  # Handled by cooldown_rotation status widget
+        pass  # Delegated to first status widget
 
     # Padding (px) around the preview image inside the Live Preview panel
     PREVIEW_PADDING = 12
 
     def set_capture_running(self, running: bool) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "set_capture_running"):
             w.set_capture_running(running)
 
-    def _update_next_intention_time(self) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
     def update_preview(self, qimg: QImage) -> None:
-        w = self._cooldown_status_widget()
-        # #region agent log (first 3 calls only)
-        _h4_count = getattr(self, "_dbg_h4_count", 0)
-        if _h4_count < 3:
-            self._dbg_h4_count = _h4_count + 1
-            try:
-                import json, time
-                from pathlib import Path
-                _logpath = Path(__file__).resolve().parent.parent.parent / "debug-6d0385.log"
-                with open(_logpath, "a") as _f:
-                    _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H4", "location": "main_window.py:update_preview", "message": "Preview delegation", "data": {"widget_is_none": w is None, "has_update_preview": hasattr(w, "update_preview") if w else False, "qimg_valid": not qimg.isNull() if qimg else False, "call": _h4_count + 1}, "timestamp": int(time.time() * 1000)}) + "\n")
-            except Exception:
-                pass
-        # #endregion
+        w = self._first_status_widget()
         if w and hasattr(w, "update_preview"):
             w.update_preview(qimg)
 
-    def _apply_slot_button_style(
-        self,
-        btn: QPushButton,
-        state: str,
-        keybind: str,
-        cooldown_remaining: Optional[float] = None,
-        slot_index: int = -1,
-    ) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _next_priority_candidate(self, states: list[dict]) -> Optional[dict]:
-        return None  # Handled by cooldown_rotation status widget
-
-    def _next_casting_priority_slot(
-        self, states: list[dict]
-    ) -> tuple[Optional[int], Optional[float]]:
-        return (None, None)  # Handled by cooldown_rotation status widget
-
-    def _next_ready_priority_slot(self, states: list[dict]) -> Optional[int]:
-        return None  # Handled by cooldown_rotation status widget
-
     def update_buff_states(self, states: dict) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "update_buff_states"):
             w.update_buff_states(states)
-
-    def _show_slot_menu(self, slot_index: int) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _rename_slot(self, slot_index: int) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _find_manual_action(self, action_id: str) -> Optional[dict]:
-        return None  # Handled by cooldown_rotation status widget
-
-    def _on_add_manual_action(self) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _on_rename_manual_action(self, action_id: str) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _on_rebind_manual_action(self, action_id: str) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _on_remove_manual_action(self, action_id: str) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
-    def _start_listening_for_key(self, slot_index: int) -> None:
-        pass  # Handled by cooldown_rotation status widget
 
     @staticmethod
     def _qt_key_to_bind_token(event) -> str:
@@ -797,14 +635,11 @@ class MainWindow(QMainWindow):
         text = str(event.text() or "").strip().lower()
         return text if len(text) == 1 else ""
 
-    def _cancel_listening(self) -> None:
-        pass  # Handled by cooldown_rotation status widget
-
     def keyPressEvent(self, event) -> None:
         super().keyPressEvent(event)
 
     def update_slot_states(self, states: list[dict]) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "update_slot_states"):
             w.update_slot_states(states)
 
@@ -813,24 +648,19 @@ class MainWindow(QMainWindow):
         self._before_save_callback = callback
 
     def mark_slots_recalibrated(self, slot_indices: set[int]) -> None:
-        w = self._cooldown_status_widget()
+        w = self._first_status_widget()
         if w and hasattr(w, "mark_slots_recalibrated"):
             w.mark_slots_recalibrated(slot_indices)
 
     def mark_slot_recalibrated(self, slot_index: int) -> None:
-        cfg = self._cooldown_config()
-        overwritten = list(cfg.get("overwritten_baseline_slots") or [])
-        if slot_index not in overwritten:
-            overwritten.append(slot_index)
-            cfg = dict(cfg)
-            cfg["overwritten_baseline_slots"] = overwritten
-            self._core.save_config("cooldown_rotation", cfg)
+        mod = self._get_automation_module()
+        if mod and hasattr(mod, "mark_slot_recalibrated"):
+            mod.mark_slot_recalibrated(slot_index)
 
     def clear_overwritten_baseline_slots(self) -> None:
-        cfg = self._cooldown_config()
-        cfg = dict(cfg)
-        cfg["overwritten_baseline_slots"] = []
-        self._core.save_config("cooldown_rotation", cfg)
+        mod = self._get_automation_module()
+        if mod and hasattr(mod, "clear_overwritten_baseline_slots"):
+            mod.clear_overwritten_baseline_slots()
 
     def _save_config(self) -> None:
         if self._before_save_callback:
