@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import copy
-import json
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from PyQt6.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFontMetrics, QImage, QPixmap
@@ -31,7 +29,7 @@ from PyQt6.QtWidgets import (
 
 import numpy as np
 
-from src.models import AppConfig, BoundingBox
+from src.models import BoundingBox
 from src.ui.priority_panel import (
     MIME_PRIORITY_ITEM,
     PriorityPanel,
@@ -331,15 +329,12 @@ class LastActionHistoryWidget(QWidget):
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "default_config.json"
-
-
 class MainWindow(QMainWindow):
     """Primary control panel for Cooldown Reader."""
 
     # Emitted when bounding box changes, so overlay can update
     bounding_box_changed = pyqtSignal(BoundingBox)
-    config_changed = pyqtSignal(AppConfig)
+    config_updated = pyqtSignal(object)  # root config dict when something changes
     # Emitted when slot layout changes (count, gap, padding) for overlay slot outlines
     slot_layout_changed = pyqtSignal(
         int, int, int
@@ -351,26 +346,18 @@ class MainWindow(QMainWindow):
     calibrate_slot_requested = pyqtSignal(int)
     start_capture_requested = pyqtSignal()
 
-    def __init__(self, config: AppConfig, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        core: Any,
+        module_manager: Any,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
-        self._config = config
-        self._key_sender: Optional["KeySender"] = None
-        self._queued_override: Optional[dict] = None
-        self._buff_states: dict[str, dict] = {}
-        self._queue_listener: Optional[object] = None
-        self._listening_slot_index: Optional[int] = None
-        self._slots_recalibrated: set[int] = set(
-            getattr(config, "overwritten_baseline_slots", [])
-        )
+        self._core = core
+        self._module_manager = module_manager
         self._before_save_callback: Optional[Callable[[], None]] = None
-        self._last_saved_config: Optional[dict] = None
-        self._last_action_sent_time: Optional[float] = (
-            None  # for "time since last fire" on Next Intention + duration for new Last Action
-        )
-        self._last_fired_by_keybind: dict[str, float] = {}  # keybind -> timestamp for priority list "Xs" display
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(580, 400)
-        # Default height: fit full layout without main scrollbar (generous for DPI/fonts)
         self.resize(800, 700)
 
         self._build_ui()
@@ -394,11 +381,8 @@ class MainWindow(QMainWindow):
         self._cast_bar_debug_label = QLabel("Cast ROI: off")
         self._cast_bar_debug_label.setStyleSheet("font-size: 10px; font-family: monospace; color: #666;")
         self.statusBar().addPermanentWidget(self._cast_bar_debug_label)
-        self._next_intention_timer = QTimer(self)
-        self._next_intention_timer.setInterval(100)
-        self._next_intention_timer.timeout.connect(self._update_next_intention_time)
         self._connect_signals()
-        self._sync_ui_from_config()
+        self._refresh_from_core()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -426,18 +410,7 @@ class MainWindow(QMainWindow):
         enable_bar.addWidget(self._bind_display)
         top_layout.addLayout(enable_bar)
 
-        # --- Content split: left (fixed top + scroll) | right (priority) ---
-        content_split = QHBoxLayout()
-        content_split.setSpacing(14)
-        left_column = QWidget(central)
-        left_column.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        left_column_layout = QVBoxLayout(left_column)
-        left_column_layout.setContentsMargins(0, 0, 0, 0)
-        left_column_layout.setSpacing(10)
-
-        # Fixed row: Start Capture + Settings (always visible)
+        # Button row: Start Capture + Settings
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
         self._btn_start = QPushButton("▶ Start Capture")
@@ -451,183 +424,46 @@ class MainWindow(QMainWindow):
         self._btn_settings.setObjectName("btnSettings")
         self._btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         button_row.addWidget(self._btn_settings)
-        left_column_layout.addLayout(button_row)
+        top_layout.addLayout(button_row)
 
-        # Live Preview (fixed, not in scroll)
-        preview_frame = QFrame(left_column)
-        preview_frame.setObjectName("sectionFrame")
-        preview_frame.setStyleSheet(
-            f"background: {SECTION_BG}; border: 1px solid {SECTION_BORDER}; border-radius: 4px; padding: 8px;"
-        )
-        preview_inner = QVBoxLayout(preview_frame)
-        preview_inner.setContentsMargins(8, 8, 8, 8)
-        title_preview = QLabel("LIVE PREVIEW")
-        title_preview.setObjectName("sectionTitle")
-        title_preview.setFixedHeight(28)
-        title_preview.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
-        )
-        title_preview.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
-        )
-        preview_inner.addWidget(title_preview)
-        self._preview_label = QLabel("No capture running")
-        self._preview_label.setObjectName("previewLabel")
-        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setMinimumHeight(42)
-        self._preview_label.setStyleSheet(
-            "background: #111; border-radius: 3px; color: #666; font-size: 11px;"
-        )
-        self._preview_label.setScaledContents(False)
-        self._preview_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        preview_inner.addWidget(self._preview_label)
-        preview_frame.setMinimumHeight(96)
-        preview_frame.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        left_column_layout.addWidget(preview_frame)
-
-        # Slot States row (fixed, not in scroll)
-        self._slot_states_row = _SlotStatesRow(left_column)
-        self._slot_states_row.setFixedHeight(34)
-        self._slot_buttons: list[SlotButton] = []
-        left_column_layout.addWidget(self._slot_states_row)
-
-        # Scroll area: only Last Action + Next Intention
-        self._left_panel = _LeftPanel(parent=central)
-        left_layout = QVBoxLayout(self._left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(14)
-        # Min height = last_action (132) + spacing (14) + next (104) so scroll bar appears before overlap
-        self._left_panel.setMinimumHeight(132 + 14 + 104)
-        self._left_panel.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        last_action_frame = QFrame()
-        last_action_frame.setObjectName("sectionFrameDark")
-        last_action_frame.setStyleSheet(
-            f"background: {SECTION_BG_DARK}; border: 1px solid {SECTION_BORDER}; border-radius: 4px; padding: 8px;"
-        )
-        last_action_inner = QVBoxLayout(last_action_frame)
-        last_action_inner.setContentsMargins(8, 8, 8, 8)
-        title_last = QLabel("LAST ACTION")
-        title_last.setObjectName("sectionTitle")
-        title_last.setFixedHeight(28)
-        title_last.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        title_last.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
-        )
-        last_action_inner.addWidget(title_last)
-        history_rows = getattr(self._config, "history_rows", 3)
-        self._last_action_history = LastActionHistoryWidget(
-            max_rows=history_rows, parent=last_action_frame, show_title=False
-        )
-        self._last_action_history.setStyleSheet("background: transparent;")
-        self._last_action_history.setMinimumHeight(80)
-        last_action_inner.addWidget(self._last_action_history)
-        # Min height so panel doesn't collapse; includes title + history + inner padding (8*2)
-        last_action_frame.setMinimumHeight(28 + 80 + 24)
-        last_action_frame.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        left_layout.addWidget(last_action_frame)
-        next_frame = QFrame()
-        next_frame.setObjectName("sectionFrameDark")
-        next_frame.setStyleSheet(
-            f"background: {SECTION_BG_DARK}; border: 1px solid {SECTION_BORDER}; border-radius: 4px; padding: 8px 10px;"
-        )
-        next_inner = QVBoxLayout(next_frame)
-        next_inner.setContentsMargins(8, 8, 8, 8)
-        title_next = QLabel("NEXT INTENTION")
-        title_next.setObjectName("sectionTitle")
-        title_next.setFixedHeight(28)
-        title_next.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        title_next.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
-        )
-        next_inner.addWidget(title_next)
-        self._next_intention_row = _ActionEntryRow(
-            "—", "no action", "", "", key_color="#555", parent=next_frame
-        )
-        next_inner.addWidget(self._next_intention_row)
-        # Min height: title + row + inner padding (8*2) so panel doesn't collapse
-        next_frame.setMinimumHeight(28 + 52 + 24)
-        next_frame.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        left_layout.addWidget(next_frame)
-        # No stretch: keep content height fixed so scroll bar appears when viewport is smaller
-        # When no capture: show centered play button; when capture running: show Last Action + Next Intention
-        scroll_content = QStackedWidget(central)
-        scroll_content.setMinimumHeight(220)
-        placeholder = QWidget()
-        placeholder.setMinimumHeight(220)
-        placeholder_layout = QVBoxLayout(placeholder)
-        placeholder_layout.setContentsMargins(0, 0, 0, 0)
-        placeholder_layout.addStretch(1)
-        _play_btn = QPushButton("▶  Start Capture")
-        _play_btn.setObjectName("placeholderPlayButton")
-        _play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        _play_btn.setMinimumSize(200, 56)
-        _play_btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        font = _play_btn.font()
-        font.setPointSize(14)
-        font.setWeight(600)
-        _play_btn.setFont(font)
-        _play_btn.setStyleSheet(
-            "QPushButton { background: #2a2a3a; border: 2px solid #4a4a5a; border-radius: 8px; color: #88aacc; padding: 12px 24px; }"
-            " QPushButton:hover { background: #333348; border-color: #66eeff; color: #66eeff; }"
-        )
-        _play_btn.clicked.connect(self.start_capture_requested.emit)
-        placeholder_layout.addWidget(_play_btn, 0, Qt.AlignmentFlag.AlignCenter)
-        placeholder_layout.addStretch(1)
-        scroll_content.addWidget(placeholder)
-        scroll_content.addWidget(self._left_panel)
-        scroll_content.setCurrentIndex(0)
-        self._scroll_content_stack = scroll_content
-        left_scroll = QScrollArea()
-        left_scroll.setWidget(scroll_content)
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        left_scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-        )
-        left_scroll.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        left_column_layout.addWidget(left_scroll, 1)
-        content_split.addWidget(left_column, 1)
-        self._priority_panel = PriorityPanel(self)
-        self._priority_panel.setFixedWidth(210)
-        content_split.addWidget(self._priority_panel, 0)
-        self._left_panel.set_drop_remove_callback(self._on_priority_drop_remove)
-
-        top_layout.addLayout(content_split, 1)
+        # Module status area (e.g. Cooldown Rotation: preview, slots, last action, next intention, priority)
+        module_scroll = QScrollArea()
+        module_scroll.setWidgetResizable(True)
+        module_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        module_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        module_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        module_content = QWidget()
+        module_layout = QVBoxLayout(module_content)
+        module_layout.setContentsMargins(0, 0, 0, 0)
+        module_layout.setSpacing(14)
+        for _name, widget in self._module_manager.get_status_widgets():
+            module_layout.addWidget(widget)
+        module_layout.addStretch(1)
+        module_scroll.setWidget(module_content)
+        top_layout.addWidget(module_scroll, 1)
 
     def _connect_signals(self) -> None:
-        self._priority_panel.priority_list.items_changed.connect(
-            self._on_priority_items_changed
-        )
-        self._priority_panel.priority_list.manual_action_rename_requested.connect(
-            self._on_rename_manual_action
-        )
-        self._priority_panel.priority_list.manual_action_rebind_requested.connect(
-            self._on_rebind_manual_action
-        )
-        self._priority_panel.priority_list.manual_action_remove_requested.connect(
-            self._on_remove_manual_action
-        )
-        self._priority_panel.add_manual_action_requested.connect(
-            self._on_add_manual_action
-        )
-        self._priority_panel.gcd_updated.connect(self._on_gcd_updated)
+        pass  # Start/Settings/automation connected by main; module widgets own their signals
+
+    def _cooldown_status_widget(self) -> Optional[QWidget]:
+        """First status widget (cooldown_rotation) for delegation. Main can also get from module_manager.get_status_widgets()."""
+        for name, widget in self._module_manager.get_status_widgets():
+            return widget
+        return None
+
+    def _cooldown_config(self) -> dict:
+        """Cooldown rotation config slice."""
+        return self._core.get_config("cooldown_rotation")
 
     def _active_priority_profile(self) -> dict:
-        return self._config.get_active_priority_profile()
+        """Active automation profile from cooldown_rotation config."""
+        cfg = self._cooldown_config()
+        profiles = cfg.get("priority_profiles") or []
+        active_id = (cfg.get("active_priority_profile_id") or "").strip().lower()
+        for p in profiles:
+            if isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == active_id):
+                return dict(p)
+        return dict(profiles[0]) if profiles else {}
 
     def _active_priority_order(self) -> list[int]:
         return list(self._active_priority_profile().get("priority_order", []))
@@ -684,164 +520,68 @@ class MainWindow(QMainWindow):
         ]
 
     def _set_priority_list_from_active_profile(self) -> None:
-        self._priority_panel.priority_list.blockSignals(True)
-        try:
-            self._priority_panel.priority_list.set_buff_rois(
-                getattr(self._config, "buff_rois", []) or []
-            )
-            self._priority_panel.priority_list.set_manual_actions(
-                self._active_manual_actions()
-            )
-            self._priority_panel.priority_list.set_items(self._active_priority_items())
-        finally:
-            self._priority_panel.priority_list.blockSignals(False)
+        pass  # Handled by cooldown_rotation status widget
 
     def set_active_priority_profile(
         self, profile_id: str, persist: bool = False
     ) -> None:
-        changed = self._config.set_active_priority_profile(profile_id)
-        if (
-            not changed
-            and self._config.active_priority_profile_id
-            != (profile_id or "").strip().lower()
-        ):
+        cfg = self._cooldown_config()
+        pid = (profile_id or "").strip().lower()
+        if not pid:
             return
-        profile = self._active_priority_profile()
-        profile_name = str(profile.get("name", "") or "").strip() or "Default"
+        profiles = cfg.get("priority_profiles") or []
+        if not any(isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == pid) for p in profiles):
+            return
+        cfg = dict(cfg)
+        cfg["active_priority_profile_id"] = pid
+        self._core.save_config("cooldown_rotation", cfg)
+        profile_name = "Default"
+        for p in profiles:
+            if isinstance(p, dict) and (str(p.get("id") or "").strip().lower() == pid):
+                profile_name = (str(p.get("name", "") or "").strip()) or "Default"
+                break
         self._profile_status_label.setText(f"Automation: {profile_name}")
-        self._priority_panel.set_priority_list_name(profile_name)
-        self._set_priority_list_from_active_profile()
         self._update_bind_display()
         if persist:
-            self._save_config()
+            self.config_updated.emit(self._core.get_root_config())
 
-    def _sync_ui_from_config(self) -> None:
-        """Set UI to match current config (main window only owns enable, bind display, priority, slots)."""
-        while len(self._config.keybinds) < self._config.slot_count:
-            self._config.keybinds.append("")
-        self._config.automation_enabled = False
+    def _refresh_from_core(self) -> None:
+        """Set UI from core: profile label, bind display, automation button, GCD; refresh module status widgets."""
         self._update_automation_button_text()
-        self._update_bind_display()
         profile_name = (
             str(self._active_priority_profile().get("name", "") or "").strip()
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
-        self._priority_panel.set_priority_list_name(profile_name)
-        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
-        self._priority_panel.priority_list.set_display_names(
-            getattr(self._config, "slot_display_names", [])
-        )
-        self._priority_panel.priority_list.set_buff_rois(
-            getattr(self._config, "buff_rois", []) or []
-        )
-        self._priority_panel.priority_list.set_manual_actions(
-            self._active_manual_actions()
-        )
-        self._set_priority_list_from_active_profile()
-        self._prepopulate_slot_buttons()
-        self._last_action_history.set_max_rows(getattr(self._config, "history_rows", 3))
-        if CONFIG_PATH.exists():
-            self._last_saved_config = copy.deepcopy(self._config.to_dict())
-        self._maybe_auto_save()
+        gcd = self._core.get_service("cooldown_rotation", "gcd_estimate")
+        if gcd is not None and isinstance(gcd, (int, float)):
+            self._gcd_label.setText(f"Est. GCD: {float(gcd):.2f}s")
+        else:
+            self._gcd_label.setText("Est. GCD: —")
+        for _name, widget in self._module_manager.get_status_widgets():
+            if hasattr(widget, "refresh_from_config"):
+                widget.refresh_from_config()
 
     def refresh_from_config(self) -> None:
-        """Called when config is updated from Settings dialog: refresh slot count, bind display, history rows."""
-        self._prepopulate_slot_buttons()
-        self._update_automation_button_text()
-        self._update_bind_display()
-        self._last_action_history.set_max_rows(getattr(self._config, "history_rows", 3))
-        profile_name = (
-            str(self._active_priority_profile().get("name", "") or "").strip()
-            or "Default"
-        )
-        self._profile_status_label.setText(f"Automation: {profile_name}")
-        self._priority_panel.set_priority_list_name(profile_name)
-        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
-        self._priority_panel.priority_list.set_display_names(
-            getattr(self._config, "slot_display_names", [])
-        )
-        self._priority_panel.priority_list.set_buff_rois(
-            getattr(self._config, "buff_rois", []) or []
-        )
-        self._priority_panel.priority_list.set_manual_actions(
-            self._active_manual_actions()
-        )
-        self._set_priority_list_from_active_profile()
+        """Called when config is updated from Settings dialog."""
+        self._refresh_from_core()
 
     def _maybe_auto_save(self) -> None:
-        """If there are unsaved changes (compared to _last_saved_config, excluding automation_enabled), save and show status."""
-        if self._last_saved_config is None:
-            self._save_config()
-            return
-        try:
-            current = self._config.to_dict()
-            current_compare = {
-                k: v for k, v in current.items() if k != "automation_enabled"
-            }
-            last_compare = {
-                k: v
-                for k, v in self._last_saved_config.items()
-                if k != "automation_enabled"
-            }
-            if current_compare != last_compare:
-                self._save_config()
-        except Exception:
-            self._save_config()
+        pass  # Config persisted via Core/settings dialog
 
     def _prepopulate_slot_buttons(self) -> None:
-        """Build slot buttons from config (slot_count + keybinds) in a not-ready state. Used on load before capture runs."""
-        n = self._config.slot_count
-        while len(self._config.keybinds) < n:
-            self._config.keybinds.append("")
-        if len(self._slot_buttons) != n:
-            for b in self._slot_buttons:
-                b.deleteLater()
-            self._slot_buttons.clear()
-            for i in range(n):
-                btn = SlotButton(i, self._slot_states_row)
-                btn.setObjectName("slotButton")
-                btn.setStyleSheet(
-                    "border: 1px solid #444; padding: 4px; font-family: monospace; font-size: 10px; font-weight: bold;"
-                )
-                btn.context_menu_requested.connect(self._show_slot_menu)
-                self._slot_buttons.append(btn)
-            self._slot_states_row.set_buttons(self._slot_buttons)
-        for i, btn in enumerate(self._slot_buttons):
-            keybind = (
-                self._config.keybinds[i] if i < len(self._config.keybinds) else "?"
-            )
-            self._apply_slot_button_style(
-                btn, "unknown", keybind or "?", None, slot_index=i
-            )
-        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
-        self._priority_panel.priority_list.update_states(
-            [
-                {
-                    "index": i,
-                    "state": "unknown",
-                    "keybind": (
-                        self._config.keybinds[i]
-                        if i < len(self._config.keybinds)
-                        else None
-                    ),
-                    "cooldown_remaining": None,
-                }
-                for i in range(n)
-            ]
-        )
+        pass  # Handled by cooldown_rotation status widget
 
     def _update_automation_button_text(self) -> None:
         """Set toggle button to Enabled/Disabled (green/gray) and bind display to Toggle: [key]."""
+        mod = self._module_manager.get("cooldown_rotation")
+        enabled = getattr(mod, "enabled", True) if mod else False
         self._btn_automation_toggle.setProperty(
-            "enabled", "true" if self._config.automation_enabled else "false"
+            "enabled", "true" if enabled else "false"
         )
         self._btn_automation_toggle.style().unpolish(self._btn_automation_toggle)
         self._btn_automation_toggle.style().polish(self._btn_automation_toggle)
-        if self._config.automation_enabled:
-            self._btn_automation_toggle.setText("Enabled")
-        else:
-            self._btn_automation_toggle.setText("Disabled")
+        self._btn_automation_toggle.setText("Enabled" if enabled else "Disabled")
         self._update_bind_display()
 
     def _update_bind_display(self) -> None:
@@ -859,175 +599,82 @@ class MainWindow(QMainWindow):
         )
 
     def _on_automation_toggle_clicked(self) -> None:
-        self._config.automation_enabled = not self._config.automation_enabled
-        if not self._config.automation_enabled:
-            self._priority_panel.stop_last_action_timer()
-            if self._queue_listener is not None and hasattr(
-                self._queue_listener, "clear_queue"
-            ):
-                self._queue_listener.clear_queue()
+        mod = self._module_manager.get("cooldown_rotation")
+        if mod:
+            mod.toggle_rotation()
         self._update_automation_button_text()
-        self.config_changed.emit(self._config)
+        self.config_updated.emit(self._core.get_root_config())
 
     def toggle_automation(self) -> None:
         """Toggle automation on/off (e.g. from global hotkey)."""
-        self._config.automation_enabled = not self._config.automation_enabled
-        if not self._config.automation_enabled:
-            self._priority_panel.stop_last_action_timer()
-            if self._queue_listener is not None and hasattr(
-                self._queue_listener, "clear_queue"
-            ):
-                self._queue_listener.clear_queue()
+        mod = self._module_manager.get("cooldown_rotation")
+        if mod:
+            mod.toggle_rotation()
         self._update_automation_button_text()
-        self.config_changed.emit(self._config)
+        self.config_updated.emit(self._core.get_root_config())
 
-    def set_config(self, config: AppConfig) -> None:
-        """Update the config reference (e.g. after import in settings). Keeps window in sync with worker/analyzer."""
-        self._config = config
+    def refresh_from_config(self) -> None:
+        """Refresh UI from core config (e.g. after import in settings)."""
+        self._refresh_from_core()
 
     def set_key_sender(self, key_sender: Optional["KeySender"]) -> None:
-        self._key_sender = key_sender
+        pass  # Key sender from core
 
     def _on_priority_items_changed(self, items: list) -> None:
-        profile = self._active_priority_profile()
-        normalized_items: list[dict] = []
-        for item in list(items or []):
-            if not isinstance(item, dict):
-                continue
-            out = dict(item)
-            if str(out.get("type", "") or "").strip().lower() == "slot":
-                out["activation_rule"] = normalize_activation_rule(
-                    out.get("activation_rule")
-                )
-                out["ready_source"] = normalize_ready_source(
-                    out.get("ready_source"), "slot"
-                )
-                out["buff_roi_id"] = str(
-                    out.get("buff_roi_id", "") or ""
-                ).strip().lower()
-            elif str(out.get("type", "") or "").strip().lower() == "manual":
-                out["ready_source"] = normalize_ready_source(
-                    out.get("ready_source"), "manual"
-                )
-                out["buff_roi_id"] = str(
-                    out.get("buff_roi_id", "") or ""
-                ).strip().lower()
-            normalized_items.append(out)
-        slot_order = self._slot_order_from_priority_items(normalized_items)
-        profile["priority_items"] = normalized_items
-        profile["priority_order"] = slot_order
-        self._config.priority_order = list(slot_order)
-        self.config_changed.emit(self._config)
-        self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _on_gcd_updated(self, gcd_seconds: float) -> None:
-        """Update the estimated GCD display in the status bar."""
         self._gcd_label.setText(f"Est. GCD: {gcd_seconds:.2f}s")
 
     def record_last_action_sent(
         self, keybind: str, timestamp: float, display_name: str = "Unidentified"
     ) -> None:
-        """Record a sent action. Duration = time since previous action (only reset here, never when intention appears)."""
-        # Elapsed is time between actions; we only update _last_action_sent_time when an action is actually sent
-        elapsed = (
-            (timestamp - self._last_action_sent_time)
-            if self._last_action_sent_time is not None
-            else 0.0
-        )
-        self._last_action_history.add_entry(
-            keybind, display_name or "Unidentified", elapsed
-        )
-        self._last_action_sent_time = (
-            timestamp  # reset only on send; Next Intention counter uses this
-        )
-        self._last_fired_by_keybind[keybind] = timestamp
-        self._priority_panel.priority_list.set_last_fired_timestamps(self._last_fired_by_keybind)
-        self._priority_panel.record_send_timestamp(timestamp)
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "record_last_action_sent"):
+            w.record_last_action_sent(keybind, timestamp, display_name)
 
     def set_next_intention_blocked(
         self, keybind: str, display_name: str = "Unidentified"
     ) -> None:
-        """Show next intention as blocked (wrong window)."""
-        self._next_intention_row.set_content(
-            keybind, display_name or "Unidentified", "ready (window)", KEY_YELLOW
-        )
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "set_next_intention_blocked"):
+            w.set_next_intention_blocked(keybind, display_name)
 
     def set_queued_override(self, q: Optional[dict]) -> None:
-        """Update the current spell queue state (dict or None). Next intention row shows queued key when set."""
-        logger.debug("set_queued_override called with: %s", q)
-        self._queued_override = q
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "set_queued_override"):
+            w.set_queued_override(q)
 
     def set_queue_listener(self, listener: Optional[object]) -> None:
-        """Set the spell queue listener so we can clear the queue when automation is toggled off."""
-        self._queue_listener = listener
+        pass  # Module owns queue listener
 
     def set_next_intention_casting_wait(
         self,
         slot_index: Optional[int],
         cast_ends_at: Optional[float],
     ) -> None:
-        """Show next intention as waiting for a current cast/channel to finish."""
-        name = "cast/channel"
-        if slot_index is not None:
-            names = getattr(self._config, "slot_display_names", [])
-            if slot_index < len(names) and (names[slot_index] or "").strip():
-                name = (names[slot_index] or "").strip()
-            else:
-                name = f"slot {slot_index + 1}"
-        if cast_ends_at:
-            remaining = max(0.0, cast_ends_at - time.time())
-            status = f"waiting: casting ({remaining:.1f}s)"
-        else:
-            status = "waiting: channeling"
-        self._next_intention_row.set_content("…", name, status, KEY_BLUE)
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "set_next_intention_casting_wait"):
+            w.set_next_intention_casting_wait(slot_index, cast_ends_at)
 
     def _on_priority_drop_remove(self, item_key: str) -> None:
-        """Called when a priority item is dropped on the left panel (remove from list)."""
-        self._priority_panel.priority_list.remove_item_by_key(item_key)
+        pass  # Handled by cooldown_rotation status widget
 
     # Padding (px) around the preview image inside the Live Preview panel
     PREVIEW_PADDING = 12
 
     def set_capture_running(self, running: bool) -> None:
-        """Show Last Action + Next Intention when capture is running; otherwise show the centered play placeholder."""
-        self._scroll_content_stack.setCurrentIndex(1 if running else 0)
-        if running:
-            self._last_action_sent_time = time.time()
-            self._next_intention_timer.start()
-            self._update_next_intention_time()
-        else:
-            self._next_intention_timer.stop()
-            self._last_action_sent_time = None
-            self._next_intention_row.set_time("")
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "set_capture_running"):
+            w.set_capture_running(running)
 
     def _update_next_intention_time(self) -> None:
-        """Live counter: time since last action sent. Only resets when an action is sent (record_last_action_sent), not when intention appears."""
-        if self._last_action_sent_time is not None:
-            self._next_intention_row.set_time(
-                f"{time.time() - self._last_action_sent_time:.1f}s"
-            )
+        pass  # Handled by cooldown_rotation status widget
 
     def update_preview(self, frame: np.ndarray) -> None:
-        """Update the live preview with a captured frame (BGR numpy array).
-
-        Scales the image to fit inside the label with equal padding on all sides,
-        preserving aspect ratio (letterbox or pillarbox as needed).
-        """
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        rgb = frame[:, :, ::-1].copy()
-        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
-
-        max_w = max(1, self._preview_label.width() - 2 * self.PREVIEW_PADDING)
-        max_h = max(1, self._preview_label.height() - 2 * self.PREVIEW_PADDING)
-        scaled = pixmap.scaled(
-            max_w,
-            max_h,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self._preview_label.setPixmap(scaled)
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "update_preview"):
+            w.update_preview(frame)
 
     def _apply_slot_button_style(
         self,
@@ -1037,306 +684,47 @@ class MainWindow(QMainWindow):
         cooldown_remaining: Optional[float] = None,
         slot_index: int = -1,
     ) -> None:
-        """Set slot button text, color, and bold if baseline was recalibrated. Skip if this slot is listening."""
-        idx = self._slot_buttons.index(btn) if btn in self._slot_buttons else slot_index
-        if idx >= 0 and self._listening_slot_index == idx:
-            return  # Keep blue while listening
-        display_key = keybind if keybind else "?"
-        text = f"[{display_key}]"
-        if cooldown_remaining is not None:
-            text += f"\n{cooldown_remaining:.1f}s"
-        btn.setText(text)
-        color = {
-            "ready": "#2d5a2d",
-            "on_cooldown": "#5a2d2d",
-            "casting": "#2a3f66",
-            "channeling": "#5a4a1f",
-            "locked": "#3f3f3f",
-            "gcd": "#5a5a2d",
-            "unknown": "#333333",
-        }.get(state, "#333333")
-        btn.setStyleSheet(
-            f"background-color: {color}; color: white; border: 1px solid #444; padding: 4px;"
-        )
-        font = btn.font()
-        font.setBold(idx >= 0 and idx in self._slots_recalibrated)
-        btn.setFont(font)
+        pass  # Handled by cooldown_rotation status widget
 
     def _next_priority_candidate(self, states: list[dict]) -> Optional[dict]:
-        """Return first eligible priority item with display fields for Next Intention."""
-        by_index = {s["index"]: s for s in states}
-        manual_by_id = {
-            str(a.get("id", "") or "").strip().lower(): a
-            for a in self._active_manual_actions()
-        }
-        for item in self._active_priority_items():
-            item_type = str(item.get("type", "") or "").strip().lower()
-            if item_type == "slot":
-                slot_index = item.get("slot_index")
-                if not isinstance(slot_index, int):
-                    continue
-                slot = by_index.get(slot_index)
-                if not slot_item_is_eligible_for_state_dict(
-                    item, slot, buff_states=self._buff_states
-                ):
-                    continue
-                keybind = (
-                    self._config.keybinds[slot_index]
-                    if slot_index < len(self._config.keybinds)
-                    else "?"
-                )
-                keybind = keybind or "?"
-                names = getattr(self._config, "slot_display_names", [])
-                name = "Unidentified"
-                if slot_index < len(names) and (names[slot_index] or "").strip():
-                    name = (names[slot_index] or "").strip()
-                return {
-                    "item_type": "slot",
-                    "slot_index": slot_index,
-                    "keybind": keybind,
-                    "display_name": name,
-                }
-            if item_type == "manual":
-                if not manual_item_is_eligible(item, buff_states=self._buff_states):
-                    continue
-                action_id = str(item.get("action_id", "") or "").strip().lower()
-                action = manual_by_id.get(action_id)
-                if not isinstance(action, dict):
-                    continue
-                keybind = str(action.get("keybind", "") or "").strip()
-                if not keybind:
-                    continue
-                name = str(action.get("name", "") or "").strip() or "Manual Action"
-                return {
-                    "item_type": "manual",
-                    "slot_index": None,
-                    "keybind": keybind,
-                    "display_name": name,
-                }
-        return None
+        return None  # Handled by cooldown_rotation status widget
 
     def _next_casting_priority_slot(
         self, states: list[dict]
     ) -> tuple[Optional[int], Optional[float]]:
-        """First slot in priority order currently casting/channeling and its cast_ends_at."""
-        by_index = {s["index"]: s for s in states}
-        for item in self._active_priority_items():
-            if str(item.get("type", "") or "").strip().lower() != "slot":
-                continue
-            slot_index = item.get("slot_index")
-            if not isinstance(slot_index, int):
-                continue
-            slot = by_index.get(slot_index)
-            if not slot:
-                continue
-            if slot.get("state") in ("casting", "channeling"):
-                return slot_index, slot.get("cast_ends_at")
-        return None, None
+        return (None, None)  # Handled by cooldown_rotation status widget
 
     def _next_ready_priority_slot(self, states: list[dict]) -> Optional[int]:
-        """Return first READY slot index from active priority items, or None."""
-        by_index = {s["index"]: s for s in states}
-        for item in self._active_priority_items():
-            if str(item.get("type", "") or "").strip().lower() != "slot":
-                continue
-            slot_index = item.get("slot_index")
-            if not isinstance(slot_index, int):
-                continue
-            slot = by_index.get(slot_index)
-            if slot_item_is_eligible_for_state_dict(
-                item, slot, buff_states=self._buff_states
-            ):
-                return slot_index
-        return None
+        return None  # Handled by cooldown_rotation status widget
 
     def update_buff_states(self, states: dict) -> None:
-        if not isinstance(states, dict):
-            self._buff_states = {}
-            self._priority_panel.priority_list.set_buff_states({})
-            return
-        self._buff_states = {
-            str(k): dict(v) for k, v in states.items() if isinstance(v, dict)
-        }
-        self._priority_panel.priority_list.set_buff_states(self._buff_states)
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "update_buff_states"):
+            w.update_buff_states(states)
 
     def _show_slot_menu(self, slot_index: int) -> None:
-        """Show context menu: Bind Key, Calibrate This Slot, Rename (identify skill)."""
-        if slot_index < 0 or slot_index >= len(self._slot_buttons):
-            return
-        btn = self._slot_buttons[slot_index]
-        menu = QMenu(self)
-        menu.addAction("Bind Key", lambda: self._start_listening_for_key(slot_index))
-        menu.addAction(
-            "Calibrate This Slot",
-            lambda: self.calibrate_slot_requested.emit(slot_index),
-        )
-        menu.addAction("Rename...", lambda: self._rename_slot(slot_index))
-        pos = btn.mapToGlobal(QPoint(0, 0)) - QPoint(0, menu.sizeHint().height())
-        menu.popup(pos)
+        pass  # Handled by cooldown_rotation status widget
 
     def _rename_slot(self, slot_index: int) -> None:
-        """Open modal to set display name for this slot (e.g. skill name)."""
-        names = getattr(self._config, "slot_display_names", [])
-        while len(names) <= slot_index:
-            names.append("")
-        current = names[slot_index].strip() or "Unidentified"
-        new_name, ok = QInputDialog.getText(
-            self,
-            "Rename Slot",
-            "Skill / action name:",
-            text=current if current != "Unidentified" else "",
-        )
-        if ok and new_name is not None:
-            while len(self._config.slot_display_names) <= slot_index:
-                self._config.slot_display_names.append("")
-            self._config.slot_display_names[slot_index] = new_name.strip()
-            self._priority_panel.priority_list.set_display_names(
-                self._config.slot_display_names
-            )
-            self.config_changed.emit(self._config)
-            self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _find_manual_action(self, action_id: str) -> Optional[dict]:
-        aid = (action_id or "").strip().lower()
-        if not aid:
-            return None
-        for action in self._active_manual_actions():
-            if str(action.get("id", "") or "").strip().lower() == aid:
-                return action
-        return None
+        return None  # Handled by cooldown_rotation status widget
 
     def _on_add_manual_action(self) -> None:
-        name, ok = QInputDialog.getText(self, "Add Manual Action", "Action name:")
-        if not ok:
-            return
-        name = (name or "").strip() or "Manual Action"
-        keybind, ok = QInputDialog.getText(
-            self, "Add Manual Action", "Keybind to send:"
-        )
-        if not ok:
-            return
-        keybind = normalize_bind((keybind or "").strip())
-        if not keybind:
-            self._show_status_message("Manual action requires a valid keybind.", 2000)
-            return
-        self._config.ensure_priority_profiles()
-        profile = self._config.get_active_priority_profile()
-        actions = [
-            a for a in list(profile.get("manual_actions", [])) if isinstance(a, dict)
-        ]
-        existing_ids = {
-            str(a.get("id", "") or "").strip().lower()
-            for a in actions
-            if isinstance(a, dict)
-        }
-        i = 1
-        while f"manual_{i}" in existing_ids:
-            i += 1
-        action_id = f"manual_{i}"
-        actions.append({"id": action_id, "name": name, "keybind": keybind})
-        profile["manual_actions"] = actions
-        items = [
-            i for i in list(profile.get("priority_items", [])) if isinstance(i, dict)
-        ]
-        if not items:
-            items = [
-                {"type": "slot", "slot_index": i, "activation_rule": "always"}
-                for i in list(profile.get("priority_order", []))
-            ]
-        items.append(
-            {
-                "type": "manual",
-                "action_id": action_id,
-                "ready_source": "always",
-                "buff_roi_id": "",
-            }
-        )
-        profile["priority_items"] = items
-        profile["priority_order"] = self._slot_order_from_priority_items(items)
-        self._config.priority_order = list(profile["priority_order"])
-        self._priority_panel.priority_list.set_manual_actions(actions)
-        self._priority_panel.priority_list.set_items(items)
-        self.config_changed.emit(self._config)
-        self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _on_rename_manual_action(self, action_id: str) -> None:
-        action = self._find_manual_action(action_id)
-        if not isinstance(action, dict):
-            return
-        current = str(action.get("name", "") or "").strip() or "Manual Action"
-        name, ok = QInputDialog.getText(
-            self, "Rename Manual Action", "Action name:", text=current
-        )
-        if not ok:
-            return
-        action["name"] = (name or "").strip() or "Manual Action"
-        self._priority_panel.priority_list.set_manual_actions(
-            self._active_manual_actions()
-        )
-        self.config_changed.emit(self._config)
-        self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _on_rebind_manual_action(self, action_id: str) -> None:
-        action = self._find_manual_action(action_id)
-        if not isinstance(action, dict):
-            return
-        current = str(action.get("keybind", "") or "").strip()
-        keybind, ok = QInputDialog.getText(
-            self, "Rebind Manual Action", "Keybind to send:", text=current
-        )
-        if not ok:
-            return
-        keybind = normalize_bind((keybind or "").strip())
-        if not keybind:
-            self._show_status_message("Manual action requires a valid keybind.", 2000)
-            return
-        action["keybind"] = keybind
-        self._priority_panel.priority_list.set_manual_actions(
-            self._active_manual_actions()
-        )
-        self.config_changed.emit(self._config)
-        self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _on_remove_manual_action(self, action_id: str) -> None:
-        aid = (action_id or "").strip().lower()
-        if not aid:
-            return
-        self._config.ensure_priority_profiles()
-        profile = self._config.get_active_priority_profile()
-        actions = [
-            a
-            for a in list(profile.get("manual_actions", []))
-            if str(a.get("id", "") or "").strip().lower() != aid
-        ]
-        items = [
-            i
-            for i in list(profile.get("priority_items", []))
-            if not (
-                str(i.get("type", "") or "").strip().lower() == "manual"
-                and str(i.get("action_id", "") or "").strip().lower() == aid
-            )
-        ]
-        profile["manual_actions"] = actions
-        profile["priority_items"] = items
-        slot_order = self._slot_order_from_priority_items(items)
-        profile["priority_order"] = slot_order
-        self._config.priority_order = list(slot_order)
-        self._priority_panel.priority_list.set_manual_actions(actions)
-        self._priority_panel.priority_list.set_items(items)
-        self.config_changed.emit(self._config)
-        self._maybe_auto_save()
+        pass  # Handled by cooldown_rotation status widget
 
     def _start_listening_for_key(self, slot_index: int) -> None:
-        """Turn slot button blue and show status; next keypress will bind (or Esc cancel)."""
-        self._cancel_listening()
-        self._listening_slot_index = slot_index
-        if slot_index < len(self._slot_buttons):
-            self._slot_buttons[slot_index].setStyleSheet(
-                "background-color: #2d2d5a; color: white; border: 1px solid #444; padding: 4px;"
-            )
-        self._show_status_message(
-            f"Press a key/combo to bind to slot {slot_index + 1}... (Esc to cancel)"
-        )
+        pass  # Handled by cooldown_rotation status widget
 
     @staticmethod
     def _qt_key_to_bind_token(event) -> str:
@@ -1383,180 +771,44 @@ class MainWindow(QMainWindow):
         return text if len(text) == 1 else ""
 
     def _cancel_listening(self) -> None:
-        """Cancel key-binding mode and revert button / status."""
-        if self._listening_slot_index is None:
-            return
-        idx = self._listening_slot_index
-        self._listening_slot_index = None
-        self._status_message_label.setText("")
-        if idx < len(self._slot_buttons):
-            keybind = (
-                self._config.keybinds[idx] if idx < len(self._config.keybinds) else "?"
-            )
-            self._apply_slot_button_style(
-                self._slot_buttons[idx], "unknown", keybind or "?", slot_index=idx
-            )
+        pass  # Handled by cooldown_rotation status widget
 
     def keyPressEvent(self, event) -> None:
-        """Capture key when in bind mode (slot keybind): Esc cancels, any other key binds to the slot."""
-        if self._listening_slot_index is not None:
-            if event.key() == Qt.Key.Key_Escape:
-                self._cancel_listening()
-                event.accept()
-                return
-            token = self._qt_key_to_bind_token(event)
-            if not token:
-                event.accept()
-                return
-            mods: set[str] = set()
-            modifiers = event.modifiers()
-            if modifiers & Qt.KeyboardModifier.ControlModifier:
-                mods.add("ctrl")
-            if modifiers & Qt.KeyboardModifier.ShiftModifier:
-                mods.add("shift")
-            if modifiers & Qt.KeyboardModifier.AltModifier:
-                mods.add("alt")
-            key_str = normalize_bind_from_parts(mods, token)
-            if key_str:
-                idx = self._listening_slot_index
-                while len(self._config.keybinds) <= idx:
-                    self._config.keybinds.append("")
-                self._config.keybinds[idx] = key_str
-                self._listening_slot_index = None
-                self._status_message_label.setText("")
-                if idx < len(self._slot_buttons):
-                    self._apply_slot_button_style(
-                        self._slot_buttons[idx], "unknown", key_str, slot_index=idx
-                    )
-                self.config_changed.emit(self._config)
-                self._maybe_auto_save()
-            event.accept()
-            return
         super().keyPressEvent(event)
 
     def update_slot_states(self, states: list[dict]) -> None:
-        """Update the slot state indicators (QPushButtons with keybind + state color).
-        Args:
-            states: List of dicts with keys: index, state, keybind, cooldown_remaining
-        """
-        # Ignore transient empty payloads while capture is running to avoid
-        # rebuilding the slot row and causing visible geometry churn.
-        if not states:
-            return
-        # Pad keybinds so we can index by slot
-        while len(self._config.keybinds) < len(states):
-            self._config.keybinds.append("")
-        if len(self._slot_buttons) != len(states):
-            for b in self._slot_buttons:
-                b.deleteLater()
-            self._slot_buttons.clear()
-            for i in range(len(states)):
-                btn = SlotButton(i, self._slot_states_row)
-                btn.setObjectName("slotButton")
-                btn.setStyleSheet(
-                    "border: 1px solid #444; padding: 4px; font-family: monospace; font-size: 10px; font-weight: bold;"
-                )
-                btn.context_menu_requested.connect(self._show_slot_menu)
-                self._slot_buttons.append(btn)
-            self._slot_states_row.set_buttons(self._slot_buttons)
-        for btn, s in zip(self._slot_buttons, states):
-            keybind = s.get("keybind")
-            if keybind is None and s["index"] < len(self._config.keybinds):
-                keybind = self._config.keybinds[s["index"]] or None
-            keybind = keybind or "?"
-            state = s.get("state", "unknown")
-            cd = s.get("cooldown_remaining")
-            self._apply_slot_button_style(
-                btn, state, keybind, cd, slot_index=s["index"]
-            )
-        self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
-        self._priority_panel.priority_list.set_manual_actions(
-            self._active_manual_actions()
-        )
-        self._priority_panel.priority_list.update_states(states)
-        if self._queued_override:
-            keybind = (self._queued_override.get("key") or "?").strip() or "?"
-            names = getattr(self._config, "slot_display_names", [])
-            slot_name = "Unidentified"
-            if self._queued_override.get("source") == "tracked":
-                si = self._queued_override.get("slot_index")
-                if si is not None and si < len(names) and (names[si] or "").strip():
-                    slot_name = (names[si] or "").strip()
-            states_by_idx = {s["index"]: s for s in states}
-            slot_ready = False
-            if self._queued_override.get("source") == "tracked":
-                si = self._queued_override.get("slot_index")
-                if si is not None:
-                    slot_ready = (states_by_idx.get(si) or {}).get("state") == "ready"
-            suffix = (
-                "queued (waiting)"
-                if not slot_ready and self._queued_override.get("source") == "tracked"
-                else "queued"
-            )
-            self._next_intention_row.set_content(keybind, slot_name, suffix, KEY_CYAN)
-            return
-        casting_slot, cast_ends_at = self._next_casting_priority_slot(states)
-        if casting_slot is not None:
-            self.set_next_intention_casting_wait(casting_slot, cast_ends_at)
-            return
-        next_slot = self._next_ready_priority_slot(states)
-        if next_slot is not None:
-            keybind = (
-                self._config.keybinds[next_slot]
-                if next_slot < len(self._config.keybinds)
-                else "?"
-            )
-            keybind = keybind or "?"
-            names = getattr(self._config, "slot_display_names", [])
-            slot_name = "Unidentified"
-            if next_slot < len(names) and (names[next_slot] or "").strip():
-                slot_name = (names[next_slot] or "").strip()
-            if not self._config.automation_enabled:
-                suffix = "ready (paused)"
-                color = KEY_YELLOW
-            elif self._key_sender is None or not self._key_sender.is_target_window_active():
-                suffix = "ready (window)"
-                color = KEY_YELLOW
-            else:
-                suffix = "ready - next"
-                color = KEY_GREEN
-            self._next_intention_row.set_content(keybind, slot_name, suffix, color)
-            return
-        self._next_intention_row.set_content("-", "no action", "", "#555")
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "update_slot_states"):
+            w.update_slot_states(states)
 
     def set_before_save_callback(self, callback: Optional[Callable[[], None]]) -> None:
         """Set a callback run before writing config (e.g. to sync baselines from analyzer)."""
         self._before_save_callback = callback
 
     def mark_slots_recalibrated(self, slot_indices: set[int]) -> None:
-        """Mark these slots as having recalibrated baselines (show label in bold)."""
-        self._slots_recalibrated |= slot_indices
+        w = self._cooldown_status_widget()
+        if w and hasattr(w, "mark_slots_recalibrated"):
+            w.mark_slots_recalibrated(slot_indices)
 
     def mark_slot_recalibrated(self, slot_index: int) -> None:
-        """Mark one slot as having its baseline overwritten by Calibrate This Slot (show bold, persist)."""
-        self._slots_recalibrated.add(slot_index)
-        if slot_index not in self._config.overwritten_baseline_slots:
-            self._config.overwritten_baseline_slots.append(slot_index)
+        cfg = self._cooldown_config()
+        overwritten = list(cfg.get("overwritten_baseline_slots") or [])
+        if slot_index not in overwritten:
+            overwritten.append(slot_index)
+            cfg = dict(cfg)
+            cfg["overwritten_baseline_slots"] = overwritten
+            self._core.save_config("cooldown_rotation", cfg)
 
     def clear_overwritten_baseline_slots(self) -> None:
-        """Clear which slots are marked as overwritten (e.g. after full Calibrate Baselines)."""
-        self._slots_recalibrated.clear()
-        self._config.overwritten_baseline_slots.clear()
+        cfg = self._cooldown_config()
+        cfg = dict(cfg)
+        cfg["overwritten_baseline_slots"] = []
+        self._core.save_config("cooldown_rotation", cfg)
 
     def _save_config(self) -> None:
-        """Persist current config to JSON and show status message."""
-        try:
-            if self._before_save_callback:
-                self._before_save_callback()
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(self._config.to_dict(), f, indent=2)
-            logger.info(f"Config saved to {CONFIG_PATH}")
-            self._last_saved_config = copy.deepcopy(self._config.to_dict())
-            self._show_status_message("Settings saved", 2000)
-        except Exception as e:
-            logger.error(f"Config save failed: {e}")
-            self._show_status_message("Save failed", 3000)
+        if self._before_save_callback:
+            self._before_save_callback()
+        self.config_updated.emit(self._core.get_root_config())
 
     def show_status_message(self, text: str, timeout_ms: int = 0) -> None:
         """Show text in the status bar to the right of the Settings button. If timeout_ms > 0, clear after that many ms."""

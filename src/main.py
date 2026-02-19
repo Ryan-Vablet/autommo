@@ -23,6 +23,9 @@ from src.automation.key_sender import KeySender
 from src.automation.queue_listener import QueueListener
 from src.capture import ScreenCapture
 from src.analysis import SlotAnalyzer
+from src.core import Core, ModuleManager
+from src.core.config_manager import ConfigManager
+from src.core.config_migration import flatten_config, migrate_config
 from src.models import AppConfig, BoundingBox
 from src.overlay import CalibrationOverlay
 from src.ui import MainWindow
@@ -262,6 +265,114 @@ class CaptureWorker(QThread):
             self._key_sender.update_config(config)
 
 
+def _capture_plan_from_core(core, monitor_width: int, monitor_height: int) -> tuple[BoundingBox, tuple[int, int]]:
+    """Return (capture_bbox, action_origin) from core config (expanded for cast/buff ROIs)."""
+    core_cfg = core.get_config("core")
+    cr_cfg = core.get_config("cooldown_rotation")
+    flat = flatten_config(core_cfg, cr_cfg)
+    cfg = AppConfig.from_dict(flat)
+    action_bbox = cfg.bounding_box
+    left = int(action_bbox.left)
+    top = int(action_bbox.top)
+    right = left + int(action_bbox.width)
+    bottom = top + int(action_bbox.height)
+    cast_region = getattr(cfg, "cast_bar_region", {}) or {}
+    if bool(cast_region.get("enabled", False)):
+        cast_w = int(cast_region.get("width", 0))
+        cast_h = int(cast_region.get("height", 0))
+        if cast_w > 1 and cast_h > 1:
+            cast_left = left + int(cast_region.get("left", 0))
+            cast_top = top + int(cast_region.get("top", 0))
+            left = min(left, cast_left)
+            top = min(top, cast_top)
+            right = max(right, cast_left + cast_w)
+            bottom = max(bottom, cast_top + cast_h)
+    for raw in list(getattr(cfg, "buff_rois", []) or []):
+        if not isinstance(raw, dict) or not bool(raw.get("enabled", True)):
+            continue
+        roi_w, roi_h = int(raw.get("width", 0)), int(raw.get("height", 0))
+        if roi_w <= 1 or roi_h <= 1:
+            continue
+        roi_left = int(action_bbox.left) + int(raw.get("left", 0))
+        roi_top = int(action_bbox.top) + int(raw.get("top", 0))
+        left = min(left, roi_left)
+        top = min(top, roi_top)
+        right = max(right, roi_left + roi_w)
+        bottom = max(bottom, roi_top + roi_h)
+    left = max(0, min(left, monitor_width - 1))
+    top = max(0, min(top, monitor_height - 1))
+    right = max(left + 1, min(right, monitor_width))
+    bottom = max(top + 1, min(bottom, monitor_height))
+    capture_bbox = BoundingBox(top=top, left=left, width=max(1, right - left), height=max(1, bottom - top))
+    action_origin = (int(action_bbox.left) - capture_bbox.left, int(action_bbox.top) - capture_bbox.top)
+    return capture_bbox, action_origin
+
+
+class ModuleCaptureWorker(QThread):
+    """Capture loop: grab frame from core capture, emit preview, set_action_origin, process_frame."""
+
+    frame_captured = pyqtSignal(np.ndarray)
+
+    def __init__(self, core, module_manager):
+        super().__init__()
+        self._core = core
+        self._module_manager = module_manager
+        self._running = False
+        self._capture = None
+        self._active_monitor_index = None
+
+    def _start_capture(self, monitor_index: int) -> None:
+        self._capture = ScreenCapture(monitor_index=monitor_index)
+        self._capture.start()
+        self._active_monitor_index = monitor_index
+
+    def run(self) -> None:
+        self._running = True
+        core_cfg = self._core.get_config("core")
+        monitor_index = int(core_cfg.get("monitor_index", 1))
+        self._start_capture(monitor_index)
+        polling_fps = 20
+        try:
+            cr_cfg = self._core.get_config("cooldown_rotation")
+            polling_fps = max(1, min(240, int(cr_cfg.get("polling_fps", 20))))
+        except Exception:
+            pass
+        interval = 1.0 / max(1, polling_fps)
+        logger.info("Module capture worker started at %s FPS", polling_fps)
+        cooldown_module = self._module_manager.get("cooldown_rotation")
+        try:
+            while self._running:
+                try:
+                    core_cfg = self._core.get_config("core")
+                    mid = int(core_cfg.get("monitor_index", 1))
+                    if self._active_monitor_index != mid:
+                        if self._capture is not None:
+                            self._capture.stop()
+                        self._start_capture(mid)
+                    monitor = self._capture.monitor_info
+                    capture_bbox, action_origin = _capture_plan_from_core(
+                        self._core,
+                        int(monitor["width"]),
+                        int(monitor["height"]),
+                    )
+                    frame = self._capture.grab_region(capture_bbox)
+                    ax, ay = action_origin
+                    if cooldown_module is not None and hasattr(cooldown_module, "set_action_origin"):
+                        cooldown_module.set_action_origin(ax, ay)
+                    self.frame_captured.emit(frame)
+                    self._module_manager.process_frame(frame)
+                except Exception as e:
+                    logger.error("Module capture error: %s", e, exc_info=True)
+                self.msleep(int(interval * 1000))
+        finally:
+            if self._capture is not None:
+                self._capture.stop()
+
+    def stop(self) -> None:
+        self._running = False
+        self.wait()
+
+
 def load_config() -> AppConfig:
     """Load config from JSON, falling back to defaults."""
     if CONFIG_PATH.exists():
@@ -283,94 +394,112 @@ def monitor_rect_for_index(monitor_index: int, monitors: list[dict]) -> QRect:
 
 
 def main() -> None:
-    config = load_config()
-    config.automation_enabled = False
-
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
 
-    # --- Initialize components ---
-    analyzer = SlotAnalyzer(config)
-    if config.slot_baselines:
-        try:
-            decoded = decode_baselines(config.slot_baselines)
-            if decoded:
-                analyzer.set_baselines(decoded)
-        except Exception as e:
-            logger.warning(f"Could not load saved baselines: {e}")
+    # --- Config: load (with migration), Core, ModuleManager ---
+    config_manager = ConfigManager(CONFIG_PATH)
+    config_manager.load_from_file()
+    root = config_manager.get_root()
+    core_cfg = root.get("core") or {}
+    cr_cfg = root.get("cooldown_rotation") or {}
+    flat = flatten_config(core_cfg, cr_cfg)
+    initial_app_config = AppConfig.from_dict(flat)
+    initial_app_config.automation_enabled = False
 
-    # --- Main window ---
-    window = MainWindow(config)
+    capture = ScreenCapture(monitor_index=int(core_cfg.get("monitor_index", 1)))
+    key_sender = KeySender(initial_app_config)
+    core = Core(config_manager, capture, key_sender)
+    module_manager = ModuleManager(core)
+    module_manager.discover(PROJECT_ROOT / "modules")
+    modules_enabled = core_cfg.get("modules_enabled") or ["cooldown_rotation"]
+    module_manager.load(modules_enabled)
+
+    cooldown_module = module_manager.get("cooldown_rotation")
+    if cooldown_module is not None and hasattr(cooldown_module, "get_analyzer"):
+        analyzer = cooldown_module.get_analyzer()
+        if analyzer is not None and cr_cfg.get("slot_baselines"):
+            try:
+                decoded = decode_baselines(cr_cfg["slot_baselines"])
+                if decoded:
+                    analyzer.set_baselines(decoded)
+            except Exception as e:
+                logger.warning("Could not load saved baselines: %s", e)
+
+    # --- Main window and settings dialog ---
+    window = MainWindow(core, module_manager)
 
     def sync_baselines_to_config() -> None:
-        config.slot_baselines = encode_baselines(analyzer.get_baselines())
+        if cooldown_module is None:
+            return
+        ana = cooldown_module.get_analyzer()
+        if ana is None:
+            return
+        cr = core.get_config("cooldown_rotation")
+        cr = dict(cr)
+        cr["slot_baselines"] = encode_baselines(ana.get_baselines())
+        core.save_config("cooldown_rotation", cr)
 
     window.set_before_save_callback(sync_baselines_to_config)
+    settings_dialog = SettingsDialog(core, module_manager, before_save_callback=sync_baselines_to_config, parent=window)
 
-    # --- Settings dialog (single instance, non-modal; close = hide) ---
-    settings_dialog = SettingsDialog(config, before_save_callback=sync_baselines_to_config, parent=window)
-
-    # Short-lived mss on main thread for monitor list and overlay setup
-    capture = ScreenCapture(monitor_index=config.monitor_index)
     capture.start()
     monitors = capture.list_monitors()
     settings_dialog.populate_monitors(monitors)
-    if getattr(config, "always_on_top", False):
+    if core_cfg.get("display", {}).get("always_on_top", False):
         window.setWindowFlags(window.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
     window.show()
-
-    # --- Calibration overlay ---
-    # Get the monitor geometry for overlay positioning
-    monitors = capture.list_monitors()
-    monitor_rect = monitor_rect_for_index(config.monitor_index, monitors)
-
-    overlay = CalibrationOverlay(monitor_geometry=monitor_rect)
-    overlay.update_bounding_box(config.bounding_box)
-    overlay.update_cast_bar_region(getattr(config, "cast_bar_region", {}))
-    overlay.update_buff_rois(getattr(config, "buff_rois", []) or [])
-    overlay.update_show_active_screen_outline(getattr(config, "show_active_screen_outline", False))
-    if config.overlay_enabled:
-        overlay.show()
-
     capture.stop()
 
-    # --- Key sender and capture worker ---
-    key_sender = KeySender(config)
-    worker = CaptureWorker(analyzer, config, key_sender)
-    window.set_key_sender(key_sender)
+    # --- Overlay ---
+    monitor_rect = monitor_rect_for_index(int(core_cfg.get("monitor_index", 1)), monitors)
+    overlay = CalibrationOverlay(monitor_geometry=monitor_rect)
+    bb = core_cfg.get("bounding_box") or {}
+    overlay.update_bounding_box(BoundingBox(top=bb.get("top", 0), left=bb.get("left", 0), width=bb.get("width", 0), height=bb.get("height", 0)))
+    overlay.update_cast_bar_region(cr_cfg.get("cast_bar_region") or {})
+    overlay.update_buff_rois(cr_cfg.get("buff_rois") or [])
+    overlay.update_show_active_screen_outline((core_cfg.get("overlay") or {}).get("show_active_screen_outline", False))
+    if (core_cfg.get("overlay") or {}).get("enabled", False):
+        overlay.show()
 
-    def on_config_changed(new_config: AppConfig) -> None:
-        nonlocal config
-        config = new_config
-        window.set_config(new_config)
-        worker.update_config(new_config)
-        key_sender.update_config(new_config)
-        overlay.update_cast_bar_region(getattr(new_config, "cast_bar_region", {}))
-        overlay.update_buff_rois(getattr(new_config, "buff_rois", []) or [])
-        overlay.update_bounding_box(new_config.bounding_box)
+    # --- Worker: module capture loop ---
+    worker = ModuleCaptureWorker(core, module_manager)
+
+    def _app_config_from_root() -> AppConfig:
+        return AppConfig.from_dict(flatten_config(core.get_config("core"), core.get_config("cooldown_rotation")))
+
+    def on_config_updated(_root) -> None:
+        cfg = _app_config_from_root()
+        key_sender.update_config(cfg)
+        if cooldown_module is not None and hasattr(cooldown_module, "update_analyzer_config"):
+            cooldown_module.update_analyzer_config()
+        c_cfg = (_root or {}).get("core") or {}
+        cr_cfg_new = (_root or {}).get("cooldown_rotation") or {}
+        overlay.update_cast_bar_region(cr_cfg_new.get("cast_bar_region") or {})
+        overlay.update_buff_rois(cr_cfg_new.get("buff_rois") or [])
+        overlay.update_bounding_box(cfg.bounding_box)
+        slots = c_cfg.get("slots") or {}
         overlay.update_slot_layout(
-            new_config.slot_count,
-            new_config.slot_gap_pixels,
-            new_config.slot_padding,
+            int(slots.get("count", 12)),
+            int(slots.get("gap_pixels", 0)),
+            int(slots.get("padding", 0)),
         )
-        overlay.update_monitor_geometry(monitor_rect_for_index(new_config.monitor_index, monitors))
-        overlay.update_show_active_screen_outline(getattr(new_config, "show_active_screen_outline", False))
-        if getattr(new_config, "overlay_enabled", True):
+        overlay.update_monitor_geometry(monitor_rect_for_index(cfg.monitor_index, monitors))
+        overlay.update_show_active_screen_outline((c_cfg.get("overlay") or {}).get("show_active_screen_outline", False))
+        if (c_cfg.get("overlay") or {}).get("enabled", True):
             overlay.show()
         else:
             overlay.hide()
         window.refresh_from_config()
-        # Apply always-on-top to main window when changed from Settings
         flags = window.windowFlags()
-        if getattr(new_config, "always_on_top", False):
+        if (c_cfg.get("display") or {}).get("always_on_top", False):
             window.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
         else:
             window.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
         window.show()
 
-    # --- Wire signals: only Settings dialog drives overlay/bbox/slots (main window no longer has those controls) ---
     def apply_overlay_visibility(visible: bool) -> None:
         overlay.show() if visible else overlay.hide()
 
@@ -381,45 +510,44 @@ def main() -> None:
     settings_dialog.slot_layout_changed.connect(overlay.update_slot_layout)
     settings_dialog.overlay_visibility_changed.connect(apply_overlay_visibility)
     settings_dialog.monitor_changed.connect(apply_monitor)
-    settings_dialog.config_updated.connect(on_config_changed)
+    settings_dialog.config_updated.connect(on_config_updated)
+    window.config_updated.connect(on_config_updated)
 
-    window.config_changed.connect(on_config_changed)
-    worker.frame_captured.connect(window.update_preview)
-    worker.state_updated.connect(window.update_slot_states)
-    worker.state_updated.connect(overlay.update_slot_states)
-    worker.buff_state_updated.connect(window.update_buff_states)
-    worker.buff_state_updated.connect(overlay.update_buff_states)
-    worker.cast_bar_debug.connect(window.update_cast_bar_debug)
+    # Module signals -> window and overlay (QueuedConnection for thread safety)
+    if cooldown_module is not None:
+        cooldown_module.slot_states_updated_signal.connect(window.update_slot_states, Qt.ConnectionType.QueuedConnection)
+        cooldown_module.slot_states_updated_signal.connect(overlay.update_slot_states, Qt.ConnectionType.QueuedConnection)
+        cooldown_module.buff_state_updated_signal.connect(window.update_buff_states, Qt.ConnectionType.QueuedConnection)
+        cooldown_module.buff_state_updated_signal.connect(overlay.update_buff_states, Qt.ConnectionType.QueuedConnection)
+        cooldown_module.cast_bar_debug_signal.connect(window.update_cast_bar_debug, Qt.ConnectionType.QueuedConnection)
+        cooldown_module.key_action_signal.connect(
+            lambda result: _on_key_action(result, window, core),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        ql = cooldown_module.get_queue_listener()
+        if ql is not None and hasattr(ql, "queue_updated"):
+            ql.queue_updated.connect(window.set_queued_override, Qt.ConnectionType.QueuedConnection)
 
-    def on_key_action(result: dict) -> None:
+    worker.frame_captured.connect(window.update_preview, Qt.ConnectionType.QueuedConnection)
+
+    def _on_key_action(result: dict, win, c) -> None:
+        cfg = _app_config_from_root()
+        names = getattr(cfg, "slot_display_names", []) or []
         slot_index = result.get("slot_index")
         item_type = str(result.get("item_type", "") or "").strip().lower()
-        names = getattr(config, "slot_display_names", [])
         display_name = str(result.get("display_name", "") or "").strip() or "Unidentified"
-        if item_type == "slot" and (
-            slot_index is not None
-            and slot_index < len(names)
-            and (names[slot_index] or "").strip()
-        ):
+        if item_type == "slot" and slot_index is not None and slot_index < len(names) and (names[slot_index] or "").strip():
             display_name = (names[slot_index] or "").strip()
         if result.get("action") == "sent":
-            window.record_last_action_sent(
-                result["keybind"], result.get("timestamp", 0.0), display_name
-            )
+            win.record_last_action_sent(result["keybind"], result.get("timestamp", 0.0), display_name)
         elif result.get("action") == "blocked" and result.get("reason") == "window":
-            window.set_next_intention_blocked(result["keybind"], display_name)
+            win.set_next_intention_blocked(result["keybind"], display_name)
         elif result.get("action") == "blocked" and result.get("reason") == "casting":
-            window.set_next_intention_casting_wait(
-                slot_index=result.get("slot_index"),
-                cast_ends_at=result.get("cast_ends_at"),
-            )
+            win.set_next_intention_casting_wait(slot_index=result.get("slot_index"), cast_ends_at=result.get("cast_ends_at"))
 
-    worker.key_action.connect(on_key_action)
+    slots = core_cfg.get("slots") or {}
+    overlay.update_slot_layout(int(slots.get("count", 12)), int(slots.get("gap_pixels", 0)), int(slots.get("padding", 0)))
 
-    # Emit initial slot layout so overlay draws slot outlines (from config; no window control)
-    overlay.update_slot_layout(config.slot_count, config.slot_gap_pixels, config.slot_padding)
-
-    # Start/stop capture via button
     is_running = [False]
 
     def toggle_capture():
@@ -448,10 +576,10 @@ def main() -> None:
 
     window.start_capture_requested.connect(on_start_capture_requested)
 
-    # Global hotkey action (works when app does not have focus)
     def all_profile_binds() -> list[str]:
-        binds: list[str] = []
-        for p in getattr(config, "priority_profiles", []) or []:
+        binds = []
+        cfg = core.get_config("cooldown_rotation")
+        for p in (cfg.get("priority_profiles") or []):
             toggle_bind = normalize_bind(str(p.get("toggle_bind", "") or ""))
             single_fire_bind = normalize_bind(str(p.get("single_fire_bind", "") or ""))
             if toggle_bind:
@@ -464,9 +592,10 @@ def main() -> None:
         bind = normalize_bind(triggered_bind or "")
         if not bind:
             return
+        profiles = (core.get_config("cooldown_rotation") or {}).get("priority_profiles") or []
         matched_profile = None
         matched_action = None
-        for p in getattr(config, "priority_profiles", []) or []:
+        for p in profiles:
             if bind == normalize_bind(str(p.get("toggle_bind", "") or "")):
                 matched_profile = p
                 matched_action = "toggle"
@@ -479,8 +608,12 @@ def main() -> None:
             return
         profile_id = str(matched_profile.get("id", "") or "").strip().lower()
         profile_name = str(matched_profile.get("name", "") or "").strip() or "Profile"
-        switched = config.set_active_priority_profile(profile_id)
-        if switched:
+        cfg = core.get_config("cooldown_rotation")
+        active_id = (cfg.get("active_priority_profile_id") or "").strip().lower()
+        if profile_id != active_id:
+            cfg = dict(cfg)
+            cfg["active_priority_profile_id"] = profile_id
+            core.save_config("cooldown_rotation", cfg)
             window.set_active_priority_profile(profile_id, persist=True)
             window.show_status_message(f"Profile: {profile_name}", 1200)
         if matched_action == "single_fire":
@@ -493,24 +626,21 @@ def main() -> None:
     hotkey_listener.triggered.connect(on_hotkey_triggered)
     hotkey_listener.start()
 
-    queue_listener = QueueListener(get_config=lambda: config)
-    queue_listener.queue_updated.connect(window.set_queued_override)
-    queue_listener.start()
-    worker.set_queue_listener(queue_listener)
-    window.set_queue_listener(queue_listener)
-
-    # Calibrate baselines: grab one frame on main thread with short-lived mss
     def revert_calibrate_button(btn):
         btn.setText("Calibrate All Baselines")
         btn.setStyleSheet("")
 
     def calibrate_baselines(button_to_update):
         btn = button_to_update
-        baselines = analyzer.get_baselines()
+        if cooldown_module is None:
+            return
+        ana = cooldown_module.get_analyzer()
+        if ana is None:
+            return
+        baselines = ana.get_baselines()
         if baselines:
             reply = QMessageBox.question(
-                window,
-                "Recalibrate all slots?",
+                window, "Recalibrate all slots?",
                 "You already have baselines set. Recalibrate all slots? This will replace existing baselines.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -518,19 +648,20 @@ def main() -> None:
             if reply != QMessageBox.StandardButton.Yes:
                 return
         try:
-            cap = ScreenCapture(monitor_index=config.monitor_index)
+            cap = ScreenCapture(monitor_index=int(core_cfg.get("monitor_index", 1)))
             cap.start()
-            frame = cap.grab_region(config.bounding_box)
+            bbox = core_cfg.get("bounding_box") or {}
+            frame = cap.grab_region(BoundingBox(top=bbox.get("top", 0), left=bbox.get("left", 0), width=bbox.get("width", 0), height=bbox.get("height", 0)))
             cap.stop()
-            analyzer.calibrate_baselines(frame)
+            ana.calibrate_baselines(frame)
             logger.info("Baselines calibrated from current frame")
-            sync_baselines_to_config()  # Update config in memory so baselines are not lost when switching windows
+            sync_baselines_to_config()
             window.clear_overwritten_baseline_slots()
             btn.setText("Calibrated ✓")
             btn.setStyleSheet("")
             QTimer.singleShot(2000, lambda: revert_calibrate_button(btn))
         except Exception as e:
-            logger.error(f"Calibration failed: {e}")
+            logger.error("Calibration failed: %s", e)
             btn.setText("Calibration Failed")
             btn.setStyleSheet("color: red;")
             QTimer.singleShot(2000, lambda: revert_calibrate_button(btn))
@@ -541,15 +672,15 @@ def main() -> None:
         rid = str(roi_id or "").strip().lower()
         if not rid:
             return
-        rois = [r for r in list(getattr(config, "buff_rois", []) or []) if isinstance(r, dict)]
-        roi = next(
-            (r for r in rois if str(r.get("id", "") or "").strip().lower() == rid),
-            None,
-        )
+        cr = core.get_config("cooldown_rotation")
+        rois = [dict(r) for r in (cr.get("buff_rois") or []) if isinstance(r, dict)]
+        roi = next((r for r in rois if str(r.get("id", "") or "").strip().lower() == rid), None)
         if roi is None:
             window.show_status_message(f"Buff ROI not found: {rid}", 2000)
             return
-        action = config.bounding_box
+        c_cfg = core.get_config("core")
+        bb = c_cfg.get("bounding_box") or {}
+        action_left, action_top = int(bb.get("left", 0)), int(bb.get("top", 0))
         roi_left = int(roi.get("left", 0))
         roi_top = int(roi.get("top", 0))
         roi_width = int(roi.get("width", 0))
@@ -557,16 +688,15 @@ def main() -> None:
         if roi_width <= 1 or roi_height <= 1:
             window.show_status_message("Buff ROI size must be > 1x1", 2000)
             return
-        left = min(int(action.left), int(action.left) + roi_left)
-        top = min(int(action.top), int(action.top) + roi_top)
-        right = max(int(action.left + action.width), int(action.left) + roi_left + roi_width)
-        bottom = max(int(action.top + action.height), int(action.top) + roi_top + roi_height)
         try:
-            cap = ScreenCapture(monitor_index=config.monitor_index)
+            cap = ScreenCapture(monitor_index=int(c_cfg.get("monitor_index", 1)))
             cap.start()
             monitor = cap.monitor_info
-            mw = int(monitor["width"])
-            mh = int(monitor["height"])
+            mw, mh = int(monitor["width"]), int(monitor["height"])
+            left = min(action_left, action_left + roi_left)
+            top = min(action_top, action_top + roi_top)
+            right = max(action_left + int(bb.get("width", 0)), action_left + roi_left + roi_width)
+            bottom = max(action_top + int(bb.get("height", 0)), action_top + roi_top + roi_height)
             left = max(0, min(left, mw - 1))
             top = max(0, min(top, mh - 1))
             right = max(left + 1, min(right, mw))
@@ -574,60 +704,57 @@ def main() -> None:
             bbox = BoundingBox(top=top, left=left, width=right - left, height=bottom - top)
             frame = cap.grab_region(bbox)
             cap.stop()
-            action_origin = (int(action.left) - int(bbox.left), int(action.top) - int(bbox.top))
-            x1 = int(action_origin[0]) + roi_left
-            y1 = int(action_origin[1]) + roi_top
-            x2 = x1 + roi_width
-            y2 = y1 + roi_height
+            action_origin = (action_left - left, action_top - top)
+            x1 = action_origin[0] + roi_left
+            y1 = action_origin[1] + roi_top
+            x2, y2 = x1 + roi_width, y1 + roi_height
             if x1 < 0 or y1 < 0 or x2 > frame.shape[1] or y2 > frame.shape[0]:
                 window.show_status_message("Buff ROI is out of capture frame", 2000)
                 return
             crop = frame[y1:y2, x1:x2]
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            calibration = roi.get("calibration", {})
-            if not isinstance(calibration, dict):
-                calibration = {}
+            calibration = dict(roi.get("calibration") or {})
             calibration["present_template"] = encode_gray_template(gray)
             roi["calibration"] = calibration
+            cr = dict(core.get_config("cooldown_rotation"))
+            cr["buff_rois"] = rois
+            core.save_config("cooldown_rotation", cr)
             settings_dialog.sync_from_config()
-            on_config_changed(config)
-            window.show_status_message(
-                f"Buff '{roi.get('name', rid)}' present calibrated", 2000
-            )
+            on_config_updated(core.get_root_config())
+            window.show_status_message(f"Buff '{roi.get('name', rid)}' present calibrated", 2000)
         except Exception as e:
-            logger.error(f"Buff calibration failed: {e}", exc_info=True)
+            logger.error("Buff calibration failed: %s", e, exc_info=True)
             window.show_status_message(f"Buff calibration failed: {e}", 2000)
 
-    settings_dialog.calibrate_buff_present_requested.connect(
-        lambda rid: calibrate_buff_roi_present(rid)
-    )
+    settings_dialog.calibrate_buff_present_requested.connect(calibrate_buff_roi_present)
 
     def calibrate_single_slot(slot_index: int) -> None:
+        if cooldown_module is None:
+            return
+        ana = cooldown_module.get_analyzer()
+        if ana is None:
+            return
         try:
-            cap = ScreenCapture(monitor_index=config.monitor_index)
+            cap = ScreenCapture(monitor_index=int(core_cfg.get("monitor_index", 1)))
             cap.start()
-            frame = cap.grab_region(config.bounding_box)
+            bb = core_cfg.get("bounding_box") or {}
+            frame = cap.grab_region(BoundingBox(top=bb.get("top", 0), left=bb.get("left", 0), width=bb.get("width", 0), height=bb.get("height", 0)))
             cap.stop()
-            analyzer.calibrate_single_slot(frame, slot_index)
+            ana.calibrate_single_slot(frame, slot_index)
             window.mark_slot_recalibrated(slot_index)
             window.show_status_message(f"Slot {slot_index + 1} calibrated ✓", 2000)
         except Exception as e:
-            logger.error(f"Per-slot calibration failed: {e}")
+            logger.error("Per-slot calibration failed: %s", e)
             window.show_status_message(f"Calibration failed: {e}", 2000)
 
     window.calibrate_slot_requested.connect(calibrate_single_slot)
-
-    # Settings button opens or raises the settings dialog
     window._btn_settings.clicked.connect(settings_dialog.show_or_raise)
 
-    # --- Run ---
     exit_code = app.exec()
-
-    # Cleanup
     hotkey_listener.stop()
-    queue_listener.stop()
     if is_running[0]:
         worker.stop()
+    module_manager.shutdown()
     sys.exit(exit_code)
 
 

@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -30,10 +30,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from src.models import AppConfig, BoundingBox
+from src.models import BoundingBox
 from src.automation.global_hotkey import CaptureOneKeyThread, format_bind_for_display
 from src.automation.binds import normalize_bind
 from src.ui.themes import load_theme
+from src.core.config_migration import migrate_config
 
 logger = logging.getLogger(__name__)
 
@@ -97,17 +98,16 @@ class SettingsDialog(QDialog):
 
     def __init__(
         self,
-        config: AppConfig,
+        core: Any,
+        module_manager: Any,
         before_save_callback: Optional[Callable[[], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
-        self._config = config
+        self._core = core
+        self._module_manager = module_manager
         self._before_save_callback = before_save_callback
         self._monitors: list[dict] = []
-        self._capture_bind_thread: Optional[CaptureOneKeyThread] = None
-        self._capture_bind_target: Optional[str] = None
-        self._rebind_event_filter_installed = False
         self._last_auto_saved: Optional[datetime] = None
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
@@ -120,9 +120,20 @@ class SettingsDialog(QDialog):
         self._status_update_timer = QTimer(self)
         self._status_update_timer.setInterval(30_000)
         self._status_update_timer.timeout.connect(self._update_status_bar)
+        self._capture_bind_thread = None
+        self._capture_bind_target: Optional[str] = None
+        self._rebind_event_filter_installed = False
         self._build_ui()
         self._connect_signals()
         self._update_status_bar()
+
+    def _get_core_config(self) -> dict:
+        return self._core.get_config("core")
+
+    def _save_core_config(self, data: dict) -> None:
+        self._core.save_config("core", data)
+        self._last_auto_saved = datetime.now()
+        self.config_updated.emit(self._core.get_root_config())
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -131,7 +142,7 @@ class SettingsDialog(QDialog):
         self._tabs = QTabWidget()
         self._tabs.setObjectName("settingsTabs")
 
-        # General tab
+        # General tab only (Detection + Automation moved to cooldown_rotation module)
         general_content = QWidget()
         general_layout = QVBoxLayout(general_content)
         general_layout.setSpacing(SECTION_GAP)
@@ -147,32 +158,9 @@ class SettingsDialog(QDialog):
         self._scroll_content = general_content
         self._tabs.addTab(general_scroll, "General")
 
-        # Detection tab
-        detection_content = QWidget()
-        detection_layout = QVBoxLayout(detection_content)
-        detection_layout.setSpacing(SECTION_GAP)
-        detection_layout.addWidget(_section_frame("Detection", self._detection_section()))
-        detection_layout.addStretch()
-        detection_scroll = QScrollArea()
-        detection_scroll.setWidgetResizable(True)
-        detection_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        detection_scroll.setWidget(detection_content)
-        self._tabs.addTab(detection_scroll, "Detection")
-
-        # Automation tab
-        automation_content = QWidget()
-        automation_layout = QVBoxLayout(automation_content)
-        automation_layout.setSpacing(SECTION_GAP)
-        automation_layout.addWidget(_section_frame("Controls", self._automation_controls_section()))
-        automation_layout.addWidget(_section_frame("Timing", self._automation_timing_section()))
-        automation_layout.addWidget(_section_frame("Priority Lists", self._automation_priority_lists_section()))
-        automation_layout.addWidget(_section_frame("Spell Queue", self._spell_queue_section()))
-        automation_layout.addStretch()
-        automation_scroll = QScrollArea()
-        automation_scroll.setWidgetResizable(True)
-        automation_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        automation_scroll.setWidget(automation_content)
-        self._tabs.addTab(automation_scroll, "Automation")
+        # Module tabs (e.g. Cooldown Rotation)
+        for name, widget in self._module_manager.get_settings_widgets():
+            self._tabs.addTab(widget, name)
 
         layout.addWidget(self._tabs)
 
@@ -807,303 +795,51 @@ class SettingsDialog(QDialog):
         self._spin_slots.valueChanged.connect(self._on_slot_layout_changed)
         self._spin_gap.valueChanged.connect(self._on_slot_layout_changed)
         self._spin_padding.valueChanged.connect(self._on_slot_layout_changed)
-        self._spin_polling_fps.valueChanged.connect(self._on_detection_changed)
-        self._spin_cooldown_min_ms.valueChanged.connect(self._on_detection_changed)
-        self._combo_detection_region.currentIndexChanged.connect(self._on_detection_changed)
-        self._spin_brightness_drop.valueChanged.connect(self._on_detection_changed)
-        self._slider_pixel_fraction.valueChanged.connect(self._on_detection_changed)
-        self._slider_change_pixel_fraction.valueChanged.connect(self._on_detection_changed)
-        self._edit_cooldown_change_ignore_by_slot.editingFinished.connect(self._on_detection_changed)
-        self._check_glow_enabled.toggled.connect(self._on_detection_changed)
-        self._spin_glow_ring_thickness.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_value_delta.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_saturation_min.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_confirm_frames.valueChanged.connect(self._on_detection_changed)
-        self._edit_glow_value_delta_by_slot.editingFinished.connect(self._on_detection_changed)
-        self._edit_glow_ring_fraction_by_slot.editingFinished.connect(self._on_detection_changed)
-        self._edit_glow_override_cooldown_by_slot.editingFinished.connect(self._on_detection_changed)
-        self._slider_glow_ring_fraction.valueChanged.connect(self._on_detection_changed)
-        self._slider_glow_red_ring_fraction.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_yellow_hue_min.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_yellow_hue_max.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_red_hue_max_low.valueChanged.connect(self._on_detection_changed)
-        self._spin_glow_red_hue_min_high.valueChanged.connect(self._on_detection_changed)
-        self._check_cast_detection.toggled.connect(self._on_detection_changed)
-        self._spin_cast_min_fraction.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_max_fraction.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_confirm_frames.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_min_ms.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_max_ms.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_cancel_grace_ms.valueChanged.connect(self._on_detection_changed)
-        self._check_channeling_enabled.toggled.connect(self._on_detection_changed)
-        self._check_lock_ready_cast_bar.toggled.connect(self._on_detection_changed)
-        self._check_cast_bar_enabled.toggled.connect(self._on_detection_changed)
-        self._spin_cast_bar_left.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_bar_top.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_bar_width.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_bar_height.valueChanged.connect(self._on_detection_changed)
-        self._spin_cast_bar_activity.valueChanged.connect(self._on_detection_changed)
-        self._combo_buff_roi.currentIndexChanged.connect(self._on_buff_roi_selected)
-        self._btn_add_buff_roi.clicked.connect(self._on_add_buff_roi)
-        self._btn_remove_buff_roi.clicked.connect(self._on_remove_buff_roi)
-        self._edit_buff_roi_name.textChanged.connect(self._on_detection_changed)
-        self._check_buff_roi_enabled.toggled.connect(self._on_detection_changed)
-        self._spin_buff_left.valueChanged.connect(self._on_detection_changed)
-        self._spin_buff_top.valueChanged.connect(self._on_detection_changed)
-        self._spin_buff_width.valueChanged.connect(self._on_detection_changed)
-        self._spin_buff_height.valueChanged.connect(self._on_detection_changed)
-        self._spin_buff_match_threshold.valueChanged.connect(self._on_detection_changed)
-        self._spin_buff_confirm_frames.valueChanged.connect(self._on_detection_changed)
-        self._btn_calibrate_buff_present.clicked.connect(self._on_calibrate_buff_present_clicked)
-        self._btn_clear_buff_templates.clicked.connect(self._on_clear_buff_templates_clicked)
-        self._combo_automation_profile.currentIndexChanged.connect(self._on_automation_profile_selected)
-        self._btn_add_automation_profile.clicked.connect(self._on_add_automation_profile)
-        self._btn_copy_automation_profile.clicked.connect(self._on_copy_automation_profile)
-        self._btn_remove_automation_profile.clicked.connect(self._on_remove_automation_profile)
-        self._edit_automation_profile_name.textChanged.connect(self._on_automation_profile_name_changed)
-        self._btn_toggle_bind.clicked.connect(self._on_rebind_toggle_clicked)
-        self._btn_toggle_bind.customContextMenuRequested.connect(self._on_rebind_toggle_cleared)
-        self._btn_single_fire_bind.clicked.connect(self._on_rebind_single_fire_clicked)
-        self._btn_single_fire_bind.customContextMenuRequested.connect(self._on_rebind_single_fire_cleared)
-        self._spin_min_delay.valueChanged.connect(self._on_min_delay_changed)
-        self._spin_gcd_ms.valueChanged.connect(self._on_gcd_ms_changed)
-        self._spin_queue_window.valueChanged.connect(self._on_queue_window_changed)
-        self._check_allow_cast_while_casting.toggled.connect(self._on_allow_cast_while_casting_changed)
-        self._edit_window_title.textChanged.connect(self._on_window_title_changed)
-        self._edit_queue_keys.textChanged.connect(self._on_queue_keys_changed)
-        self._spin_queue_timeout.valueChanged.connect(self._on_queue_timeout_changed)
-        self._spin_queue_fire_delay.valueChanged.connect(self._on_queue_fire_delay_changed)
         self._btn_calibrate.clicked.connect(self._on_calibrate_clicked)
 
     def sync_from_config(self) -> None:
-        """Populate all controls from current config."""
-        self._config.ensure_priority_profiles()
+        """Populate General tab from core config."""
+        c = self._get_core_config()
         self._edit_profile_name.blockSignals(True)
-        self._edit_profile_name.setText(getattr(self._config, "profile_name", "") or "")
+        self._edit_profile_name.setText((c.get("profile_name") or "").strip())
         self._edit_profile_name.blockSignals(False)
+        ov = c.get("overlay") or {}
         self._check_overlay.blockSignals(True)
-        self._check_overlay.setChecked(self._config.overlay_enabled)
+        self._check_overlay.setChecked(bool(ov.get("enabled", False)))
         self._check_overlay.blockSignals(False)
+        disp = c.get("display") or {}
         self._check_always_on_top.blockSignals(True)
-        self._check_always_on_top.setChecked(getattr(self._config, "always_on_top", False))
+        self._check_always_on_top.setChecked(bool(disp.get("always_on_top", False)))
         self._check_always_on_top.blockSignals(False)
         self._check_active_screen_outline.blockSignals(True)
-        self._check_active_screen_outline.setChecked(getattr(self._config, "show_active_screen_outline", False))
+        self._check_active_screen_outline.setChecked(bool(ov.get("show_active_screen_outline", False)))
         self._check_active_screen_outline.blockSignals(False)
         self._spin_history_rows.blockSignals(True)
-        self._spin_history_rows.setValue(getattr(self._config, "history_rows", 3))
+        self._spin_history_rows.setValue(max(1, min(10, disp.get("history_rows", 3))))
         self._spin_history_rows.blockSignals(False)
-        bb = self._config.bounding_box
+        bb = c.get("bounding_box") or {}
         self._spin_top.blockSignals(True)
         self._spin_left.blockSignals(True)
         self._spin_width.blockSignals(True)
         self._spin_height.blockSignals(True)
-        self._spin_top.setValue(bb.top)
-        self._spin_left.setValue(bb.left)
-        self._spin_width.setValue(bb.width)
-        self._spin_height.setValue(bb.height)
+        self._spin_top.setValue(int(bb.get("top", 0)))
+        self._spin_left.setValue(int(bb.get("left", 0)))
+        self._spin_width.setValue(int(bb.get("width", 0)))
+        self._spin_height.setValue(int(bb.get("height", 0)))
         self._spin_top.blockSignals(False)
         self._spin_left.blockSignals(False)
         self._spin_width.blockSignals(False)
         self._spin_height.blockSignals(False)
+        slots = c.get("slots") or {}
         self._spin_slots.blockSignals(True)
         self._spin_gap.blockSignals(True)
         self._spin_padding.blockSignals(True)
-        self._spin_slots.setValue(self._config.slot_count)
-        self._spin_gap.setValue(self._config.slot_gap_pixels)
-        self._spin_padding.setValue(self._config.slot_padding)
+        self._spin_slots.setValue(int(slots.get("count", 12)))
+        self._spin_gap.setValue(int(slots.get("gap_pixels", 0)))
+        self._spin_padding.setValue(int(slots.get("padding", 0)))
         self._spin_slots.blockSignals(False)
         self._spin_gap.blockSignals(False)
         self._spin_padding.blockSignals(False)
-        self._spin_polling_fps.blockSignals(True)
-        self._spin_cooldown_min_ms.blockSignals(True)
-        self._spin_brightness_drop.blockSignals(True)
-        self._slider_pixel_fraction.blockSignals(True)
-        self._slider_change_pixel_fraction.blockSignals(True)
-        self._combo_detection_region.blockSignals(True)
-        self._edit_cooldown_change_ignore_by_slot.blockSignals(True)
-        self._check_glow_enabled.blockSignals(True)
-        self._spin_glow_ring_thickness.blockSignals(True)
-        self._spin_glow_value_delta.blockSignals(True)
-        self._spin_glow_saturation_min.blockSignals(True)
-        self._spin_glow_confirm_frames.blockSignals(True)
-        self._edit_glow_value_delta_by_slot.blockSignals(True)
-        self._edit_glow_ring_fraction_by_slot.blockSignals(True)
-        self._edit_glow_override_cooldown_by_slot.blockSignals(True)
-        self._slider_glow_ring_fraction.blockSignals(True)
-        self._slider_glow_red_ring_fraction.blockSignals(True)
-        self._spin_glow_yellow_hue_min.blockSignals(True)
-        self._spin_glow_yellow_hue_max.blockSignals(True)
-        self._spin_glow_red_hue_max_low.blockSignals(True)
-        self._spin_glow_red_hue_min_high.blockSignals(True)
-        self._spin_polling_fps.setValue(int(getattr(self._config, "polling_fps", 20)))
-        self._spin_cooldown_min_ms.setValue(int(getattr(self._config, "cooldown_min_duration_ms", 2000)))
-        self._spin_brightness_drop.setValue(self._config.brightness_drop_threshold)
-        region = (getattr(self._config, "detection_region", None) or "top_left").strip().lower()
-        if region not in ("full", "top_left"):
-            region = "top_left"
-        idx = self._combo_detection_region.findData(region)
-        self._combo_detection_region.setCurrentIndex(idx if idx >= 0 else 0)
-        self._slider_pixel_fraction.setValue(int(self._config.cooldown_pixel_fraction * 100))
-        self._pixel_fraction_label.setText(f"{self._config.cooldown_pixel_fraction:.2f}")
-        self._slider_change_pixel_fraction.setValue(
-            int(round(getattr(self._config, "cooldown_change_pixel_fraction", self._config.cooldown_pixel_fraction) * 100))
-        )
-        self._change_pixel_fraction_label.setText(
-            f"{getattr(self._config, 'cooldown_change_pixel_fraction', self._config.cooldown_pixel_fraction):.2f}"
-        )
-        self._edit_cooldown_change_ignore_by_slot.setText(
-            self._format_slot_index_list(
-                getattr(self._config, "cooldown_change_ignore_by_slot", []) or []
-            )
-        )
-        self._check_glow_enabled.setChecked(bool(getattr(self._config, "glow_enabled", True)))
-        self._spin_glow_ring_thickness.setValue(int(getattr(self._config, "glow_ring_thickness_px", 4)))
-        self._spin_glow_value_delta.setValue(int(getattr(self._config, "glow_value_delta", 35)))
-        self._spin_glow_saturation_min.setValue(int(getattr(self._config, "glow_saturation_min", 80)))
-        self._spin_glow_confirm_frames.setValue(int(getattr(self._config, "glow_confirm_frames", 2)))
-        self._edit_glow_value_delta_by_slot.setText(
-            self._format_glow_value_delta_by_slot(
-                getattr(self._config, "glow_value_delta_by_slot", {}) or {}
-            )
-        )
-        self._edit_glow_ring_fraction_by_slot.setText(
-            self._format_glow_ring_fraction_by_slot(
-                getattr(self._config, "glow_ring_fraction_by_slot", {}) or {}
-            )
-        )
-        self._edit_glow_override_cooldown_by_slot.setText(
-            self._format_slot_index_list(
-                getattr(self._config, "glow_override_cooldown_by_slot", []) or []
-            )
-        )
-        self._slider_glow_ring_fraction.setValue(
-            int(round(getattr(self._config, "glow_ring_fraction", 0.18) * 100))
-        )
-        self._slider_glow_red_ring_fraction.setValue(
-            int(
-                round(
-                    getattr(
-                        self._config,
-                        "glow_red_ring_fraction",
-                        getattr(self._config, "glow_ring_fraction", 0.18),
-                    )
-                    * 100
-                )
-            )
-        )
-        self._spin_glow_yellow_hue_min.setValue(int(getattr(self._config, "glow_yellow_hue_min", 18)))
-        self._spin_glow_yellow_hue_max.setValue(int(getattr(self._config, "glow_yellow_hue_max", 42)))
-        self._spin_glow_red_hue_max_low.setValue(int(getattr(self._config, "glow_red_hue_max_low", 12)))
-        self._spin_glow_red_hue_min_high.setValue(int(getattr(self._config, "glow_red_hue_min_high", 168)))
-        self._glow_ring_fraction_label.setText(f"{getattr(self._config, 'glow_ring_fraction', 0.18):.2f}")
-        self._glow_red_ring_fraction_label.setText(
-            f"{getattr(self._config, 'glow_red_ring_fraction', getattr(self._config, 'glow_ring_fraction', 0.18)):.2f}"
-        )
-        self._check_cast_detection.blockSignals(True)
-        self._spin_cast_min_fraction.blockSignals(True)
-        self._spin_cast_max_fraction.blockSignals(True)
-        self._spin_cast_confirm_frames.blockSignals(True)
-        self._spin_cast_min_ms.blockSignals(True)
-        self._spin_cast_max_ms.blockSignals(True)
-        self._spin_cast_cancel_grace_ms.blockSignals(True)
-        self._check_channeling_enabled.blockSignals(True)
-        self._check_lock_ready_cast_bar.blockSignals(True)
-        self._check_cast_bar_enabled.blockSignals(True)
-        self._spin_cast_bar_left.blockSignals(True)
-        self._spin_cast_bar_top.blockSignals(True)
-        self._spin_cast_bar_width.blockSignals(True)
-        self._spin_cast_bar_height.blockSignals(True)
-        self._spin_cast_bar_activity.blockSignals(True)
-        self._check_cast_detection.setChecked(getattr(self._config, "cast_detection_enabled", True))
-        self._spin_cast_min_fraction.setValue(
-            int(round(getattr(self._config, "cast_candidate_min_fraction", 0.05) * 100))
-        )
-        self._spin_cast_max_fraction.setValue(
-            int(round(getattr(self._config, "cast_candidate_max_fraction", 0.22) * 100))
-        )
-        self._spin_cast_confirm_frames.setValue(getattr(self._config, "cast_confirm_frames", 2))
-        self._spin_cast_min_ms.setValue(getattr(self._config, "cast_min_duration_ms", 150))
-        self._spin_cast_max_ms.setValue(getattr(self._config, "cast_max_duration_ms", 3000))
-        self._spin_cast_cancel_grace_ms.setValue(getattr(self._config, "cast_cancel_grace_ms", 120))
-        self._check_channeling_enabled.setChecked(getattr(self._config, "channeling_enabled", True))
-        self._check_lock_ready_cast_bar.setChecked(
-            getattr(self._config, "lock_ready_while_cast_bar_active", False)
-        )
-        cast_bar_region = getattr(self._config, "cast_bar_region", {}) or {}
-        self._check_cast_bar_enabled.setChecked(bool(cast_bar_region.get("enabled", False)))
-        self._spin_cast_bar_left.setValue(int(cast_bar_region.get("left", 0)))
-        self._spin_cast_bar_top.setValue(int(cast_bar_region.get("top", 0)))
-        self._spin_cast_bar_width.setValue(int(cast_bar_region.get("width", 0)))
-        self._spin_cast_bar_height.setValue(int(cast_bar_region.get("height", 0)))
-        self._spin_cast_bar_activity.setValue(
-            int(round(getattr(self._config, "cast_bar_activity_threshold", 12.0)))
-        )
-        self._spin_polling_fps.blockSignals(False)
-        self._spin_cooldown_min_ms.blockSignals(False)
-        self._spin_brightness_drop.blockSignals(False)
-        self._slider_pixel_fraction.blockSignals(False)
-        self._slider_change_pixel_fraction.blockSignals(False)
-        self._combo_detection_region.blockSignals(False)
-        self._edit_cooldown_change_ignore_by_slot.blockSignals(False)
-        self._check_glow_enabled.blockSignals(False)
-        self._spin_glow_ring_thickness.blockSignals(False)
-        self._spin_glow_value_delta.blockSignals(False)
-        self._spin_glow_saturation_min.blockSignals(False)
-        self._spin_glow_confirm_frames.blockSignals(False)
-        self._edit_glow_value_delta_by_slot.blockSignals(False)
-        self._edit_glow_ring_fraction_by_slot.blockSignals(False)
-        self._edit_glow_override_cooldown_by_slot.blockSignals(False)
-        self._slider_glow_ring_fraction.blockSignals(False)
-        self._slider_glow_red_ring_fraction.blockSignals(False)
-        self._spin_glow_yellow_hue_min.blockSignals(False)
-        self._spin_glow_yellow_hue_max.blockSignals(False)
-        self._spin_glow_red_hue_max_low.blockSignals(False)
-        self._spin_glow_red_hue_min_high.blockSignals(False)
-        self._check_cast_detection.blockSignals(False)
-        self._spin_cast_min_fraction.blockSignals(False)
-        self._spin_cast_max_fraction.blockSignals(False)
-        self._spin_cast_confirm_frames.blockSignals(False)
-        self._spin_cast_min_ms.blockSignals(False)
-        self._spin_cast_max_ms.blockSignals(False)
-        self._spin_cast_cancel_grace_ms.blockSignals(False)
-        self._check_channeling_enabled.blockSignals(False)
-        self._check_lock_ready_cast_bar.blockSignals(False)
-        self._check_cast_bar_enabled.blockSignals(False)
-        self._spin_cast_bar_left.blockSignals(False)
-        self._spin_cast_bar_top.blockSignals(False)
-        self._spin_cast_bar_width.blockSignals(False)
-        self._spin_cast_bar_height.blockSignals(False)
-        self._spin_cast_bar_activity.blockSignals(False)
-        self._sync_buff_roi_controls()
-        self._sync_automation_profile_controls()
-        self._spin_min_delay.blockSignals(True)
-        self._spin_min_delay.setValue(getattr(self._config, "min_press_interval_ms", 150))
-        self._spin_min_delay.blockSignals(False)
-        self._spin_gcd_ms.blockSignals(True)
-        self._spin_gcd_ms.setValue(int(getattr(self._config, "gcd_ms", 1500)))
-        self._spin_gcd_ms.blockSignals(False)
-        self._spin_queue_window.blockSignals(True)
-        self._spin_queue_window.setValue(getattr(self._config, "queue_window_ms", 120))
-        self._spin_queue_window.blockSignals(False)
-        self._check_allow_cast_while_casting.blockSignals(True)
-        self._check_allow_cast_while_casting.setChecked(
-            bool(getattr(self._config, "allow_cast_while_casting", False))
-        )
-        self._check_allow_cast_while_casting.blockSignals(False)
-        self._edit_window_title.blockSignals(True)
-        self._edit_window_title.setText(getattr(self._config, "target_window_title", "") or "")
-        self._edit_window_title.blockSignals(False)
-        whitelist = getattr(self._config, "queue_whitelist", []) or []
-        self._edit_queue_keys.blockSignals(True)
-        self._edit_queue_keys.setText(", ".join(k for k in whitelist))
-        self._edit_queue_keys.blockSignals(False)
-        self._spin_queue_timeout.blockSignals(True)
-        self._spin_queue_timeout.setValue(getattr(self._config, "queue_timeout_ms", 5000))
-        self._spin_queue_timeout.blockSignals(False)
-        self._spin_queue_fire_delay.blockSignals(True)
-        self._spin_queue_fire_delay.setValue(getattr(self._config, "queue_fire_delay_ms", 100))
-        self._spin_queue_fire_delay.blockSignals(False)
         self._update_monitor_combo()
         self._update_status_bar()
 
@@ -1190,9 +926,11 @@ class SettingsDialog(QDialog):
         self._automation_bind_conflict_badge.setVisible(True)
 
     def _update_monitor_combo(self) -> None:
+        c = self._get_core_config()
+        mid = int(c.get("monitor_index", 1))
         self._monitor_combo.blockSignals(True)
         try:
-            idx = self._monitor_combo.findData(self._config.monitor_index)
+            idx = self._monitor_combo.findData(mid)
             if idx >= 0:
                 self._monitor_combo.setCurrentIndex(idx)
         finally:
@@ -1200,6 +938,8 @@ class SettingsDialog(QDialog):
 
     def populate_monitors(self, monitors: list[dict]) -> None:
         self._monitors = list(monitors)
+        c = self._get_core_config()
+        mid = int(c.get("monitor_index", 1))
         self._monitor_combo.blockSignals(True)
         try:
             self._monitor_combo.clear()
@@ -1208,17 +948,48 @@ class SettingsDialog(QDialog):
                     f"Monitor {i + 1}: {m['width']}x{m['height']}", i + 1
                 )
             if monitors:
-                clamped = min(max(1, self._config.monitor_index), len(monitors))
-                if self._config.monitor_index != clamped:
-                    self._config.monitor_index = clamped
+                clamped = min(max(1, mid), len(monitors))
+                if mid != clamped:
+                    c = dict(c)
+                    c["monitor_index"] = clamped
+                    self._save_core_config(c)
                 self._monitor_combo.setCurrentIndex(clamped - 1)
         finally:
             self._monitor_combo.blockSignals(False)
 
-    def _emit_config(self) -> None:
-        self.config_updated.emit(self._config)
+    def _schedule_save(self) -> None:
         self._auto_save_timer.stop()
         self._auto_save_timer.start(1000)
+
+    def _collect_core_from_widgets(self) -> dict:
+        """Build core config dict from General tab widgets."""
+        data = self._get_core_config()
+        data = dict(data)
+        data["profile_name"] = (self._edit_profile_name.text() or "").strip()
+        data["monitor_index"] = int(self._monitor_combo.currentData() or 1)
+        ov = data.get("overlay") or {}
+        ov = dict(ov)
+        ov["enabled"] = self._check_overlay.isChecked()
+        ov["show_active_screen_outline"] = self._check_active_screen_outline.isChecked()
+        data["overlay"] = ov
+        disp = data.get("display") or {}
+        disp = dict(disp)
+        disp["always_on_top"] = self._check_always_on_top.isChecked()
+        disp["history_rows"] = max(1, min(10, self._spin_history_rows.value()))
+        data["display"] = disp
+        data["bounding_box"] = {
+            "top": self._spin_top.value(),
+            "left": self._spin_left.value(),
+            "width": self._spin_width.value(),
+            "height": self._spin_height.value(),
+        }
+        slots = data.get("slots") or {}
+        slots = dict(slots)
+        slots["count"] = self._spin_slots.value()
+        slots["gap_pixels"] = self._spin_gap.value()
+        slots["padding"] = self._spin_padding.value()
+        data["slots"] = slots
+        return data
 
     def _do_auto_save(self) -> None:
         self._status_saving = True
@@ -1226,11 +997,10 @@ class SettingsDialog(QDialog):
         try:
             if self._before_save_callback:
                 self._before_save_callback()
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(self._config.to_dict(), f, indent=2)
+            core_data = self._collect_core_from_widgets()
+            self._save_core_config(core_data)
             self._last_auto_saved = datetime.now()
-            logger.info(f"Config auto-saved to {CONFIG_PATH}")
+            logger.info("Config auto-saved")
         except Exception as e:
             logger.error(f"Config auto-save failed: {e}")
         finally:
@@ -1241,14 +1011,14 @@ class SettingsDialog(QDialog):
         self._update_status_bar()
 
     def _on_profile_changed(self) -> None:
-        self._config.profile_name = (self._edit_profile_name.text() or "").strip()
-        self._emit_config()
+        self._schedule_save()
 
     def _on_export(self) -> None:
-        profile = (self._config.profile_name or "").strip()
+        c = self._get_core_config()
+        profile = (c.get("profile_name") or "").strip()
         default_path = ""
         if profile:
-            safe = "".join(c if c not in '<>:"/\\|?*' else "_" for c in profile)
+            safe = "".join(ch if ch not in '<>:"/\\|?*' else "_" for ch in profile)
             default_path = str(Path.home() / f"{safe}.json")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Config", default_path, "JSON (*.json);;All Files (*)"
@@ -1259,7 +1029,7 @@ class SettingsDialog(QDialog):
             if self._before_save_callback:
                 self._before_save_callback()
             with open(path, "w") as f:
-                json.dump(self._config.to_dict(), f, indent=2)
+                json.dump(self._core.get_root_config(), f, indent=2)
             logger.info(f"Config exported to {path}")
         except Exception as e:
             logger.error(f"Export failed: {e}")
@@ -1273,12 +1043,12 @@ class SettingsDialog(QDialog):
         try:
             with open(path) as f:
                 data = json.load(f)
-            self._config = AppConfig.from_dict(data)
+            if not data or "core" not in data:
+                data = migrate_config(data)
+                logger.info("Config migrated to namespaced format")
+            self._core.set_root_config(data)
             self.sync_from_config()
-            self._emit_config()
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(self._config.to_dict(), f, indent=2)
+            self.config_updated.emit(self._core.get_root_config())
             logger.info(f"Config imported from {path}")
         except Exception as e:
             logger.error(f"Import failed: {e}")
@@ -1288,47 +1058,39 @@ class SettingsDialog(QDialog):
             return
         mid = self._monitor_combo.itemData(index)
         if mid is not None:
-            self._config.monitor_index = int(mid)
-            self.monitor_changed.emit(self._config.monitor_index)
-            self._emit_config()
+            self.monitor_changed.emit(int(mid))
+            self._schedule_save()
 
     def _on_overlay_changed(self, checked: bool) -> None:
-        self._config.overlay_enabled = checked
         self.overlay_visibility_changed.emit(checked)
-        self._emit_config()
+        self._schedule_save()
 
     def _on_always_on_top_changed(self, checked: bool) -> None:
-        self._config.always_on_top = checked
-        self._emit_config()
+        self._schedule_save()
 
     def _on_active_screen_outline_changed(self, checked: bool) -> None:
-        self._config.show_active_screen_outline = checked
-        self._emit_config()
+        self._schedule_save()
 
     def _on_history_rows_changed(self, value: int) -> None:
-        self._config.history_rows = max(1, min(10, value))
-        self._emit_config()
+        self._schedule_save()
 
     def _on_bbox_changed(self) -> None:
-        self._config.bounding_box = BoundingBox(
+        bbox = BoundingBox(
             top=self._spin_top.value(),
             left=self._spin_left.value(),
             width=self._spin_width.value(),
             height=self._spin_height.value(),
         )
-        self.bounding_box_changed.emit(self._config.bounding_box)
-        self._emit_config()
+        self.bounding_box_changed.emit(bbox)
+        self._schedule_save()
 
     def _on_slot_layout_changed(self) -> None:
-        self._config.slot_count = self._spin_slots.value()
-        self._config.slot_gap_pixels = self._spin_gap.value()
-        self._config.slot_padding = self._spin_padding.value()
         self.slot_layout_changed.emit(
-            self._config.slot_count,
-            self._config.slot_gap_pixels,
-            self._config.slot_padding,
+            self._spin_slots.value(),
+            self._spin_gap.value(),
+            self._spin_padding.value(),
         )
-        self._emit_config()
+        self._schedule_save()
 
     @staticmethod
     def _parse_glow_value_delta_by_slot(raw_text: str) -> dict[int, int]:
