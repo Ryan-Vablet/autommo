@@ -378,6 +378,20 @@ class SettingsDialog(QDialog):
         group_row.addWidget(self._edit_cooldown_group_by_slot)
         group_row.addWidget(group_help)
         fl.addRow(_row_label("Cooldown groups:"), group_row)
+        self._edit_detection_region_overrides = QLineEdit()
+        self._edit_detection_region_overrides.setPlaceholderText("e.g. 1:top_left, 4:full")
+        self._edit_detection_region_overrides.setToolTip(
+            "Optional per-slot detection region overrides as slot:mode pairs (0-based). Modes: top_left, full."
+        )
+        region_override_help = QLabel("(?)")
+        region_override_help.setObjectName("hint")
+        region_override_help.setToolTip(
+            "Example: 1:top_left keeps slot 1 on top-left cooldown detection while global Region can stay Full Slot."
+        )
+        region_override_row = QHBoxLayout()
+        region_override_row.addWidget(self._edit_detection_region_overrides)
+        region_override_row.addWidget(region_override_help)
+        fl.addRow(_row_label("Region by slot:"), region_override_row)
         self._check_glow_enabled = QCheckBox("Enable glow ready override")
         self._check_glow_enabled.setToolTip(
             "If enabled, confirmed icon glow can mark a slot ready even when generic change-delta says not-ready."
@@ -888,6 +902,7 @@ class SettingsDialog(QDialog):
         self._slider_change_pixel_fraction.valueChanged.connect(self._on_detection_changed)
         self._edit_cooldown_change_ignore_by_slot.editingFinished.connect(self._on_detection_changed)
         self._edit_cooldown_group_by_slot.editingFinished.connect(self._on_detection_changed)
+        self._edit_detection_region_overrides.editingFinished.connect(self._on_detection_changed)
         self._check_glow_enabled.toggled.connect(self._on_detection_changed)
         self._combo_glow_mode.currentIndexChanged.connect(self._on_detection_changed)
         self._spin_glow_ring_thickness.valueChanged.connect(self._on_detection_changed)
@@ -1009,6 +1024,7 @@ class SettingsDialog(QDialog):
         self._combo_detection_region.blockSignals(True)
         self._edit_cooldown_change_ignore_by_slot.blockSignals(True)
         self._edit_cooldown_group_by_slot.blockSignals(True)
+        self._edit_detection_region_overrides.blockSignals(True)
         self._check_glow_enabled.blockSignals(True)
         self._combo_glow_mode.blockSignals(True)
         self._spin_glow_ring_thickness.blockSignals(True)
@@ -1048,6 +1064,11 @@ class SettingsDialog(QDialog):
         self._edit_cooldown_group_by_slot.setText(
             self._format_cooldown_group_by_slot(
                 getattr(self._config, "cooldown_group_by_slot", {}) or {}
+            )
+        )
+        self._edit_detection_region_overrides.setText(
+            self._format_detection_region_overrides(
+                getattr(self._config, "detection_region_overrides", {}) or {}
             )
         )
         self._check_glow_enabled.setChecked(bool(getattr(self._config, "glow_enabled", True)))
@@ -1145,6 +1166,7 @@ class SettingsDialog(QDialog):
         self._combo_detection_region.blockSignals(False)
         self._edit_cooldown_change_ignore_by_slot.blockSignals(False)
         self._edit_cooldown_group_by_slot.blockSignals(False)
+        self._edit_detection_region_overrides.blockSignals(False)
         self._check_glow_enabled.blockSignals(False)
         self._combo_glow_mode.blockSignals(False)
         self._spin_glow_ring_thickness.blockSignals(False)
@@ -1573,6 +1595,38 @@ class SettingsDialog(QDialog):
             parsed.append((slot_idx, group_id))
         return ", ".join(f"{slot}:{gid}" for slot, gid in sorted(parsed, key=lambda t: t[0]))
 
+    @staticmethod
+    def _parse_detection_region_overrides(raw_text: str) -> dict[int, str]:
+        out: dict[int, str] = {}
+        for token in str(raw_text or "").split(","):
+            part = token.strip()
+            if not part or ":" not in part:
+                continue
+            left, right = part.split(":", 1)
+            try:
+                slot_idx = int(left.strip())
+            except Exception:
+                continue
+            mode = str(right or "").strip().lower()
+            if slot_idx < 0 or mode not in ("full", "top_left"):
+                continue
+            out[slot_idx] = mode
+        return out
+
+    @staticmethod
+    def _format_detection_region_overrides(values: dict) -> str:
+        parsed: list[tuple[int, str]] = []
+        for k, v in dict(values or {}).items():
+            try:
+                slot_idx = int(k)
+            except Exception:
+                continue
+            mode = str(v or "").strip().lower()
+            if slot_idx < 0 or mode not in ("full", "top_left"):
+                continue
+            parsed.append((slot_idx, mode))
+        return ", ".join(f"{slot}:{mode}" for slot, mode in sorted(parsed, key=lambda t: t[0]))
+
     def _selected_form_index(self) -> int:
         idx = self._combo_form.currentIndex()
         if idx < 0:
@@ -1895,6 +1949,9 @@ class SettingsDialog(QDialog):
         )
         self._config.cooldown_group_by_slot = self._parse_cooldown_group_by_slot(
             self._edit_cooldown_group_by_slot.text()
+        )
+        self._config.detection_region_overrides = self._parse_detection_region_overrides(
+            self._edit_detection_region_overrides.text()
         )
         self._config.glow_enabled = self._check_glow_enabled.isChecked()
         glow_mode = str(self._combo_glow_mode.currentData() or "color").strip().lower()

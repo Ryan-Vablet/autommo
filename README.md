@@ -97,6 +97,7 @@ The right panel also shows:
 - **Always on top** Ã¢â‚¬â€ Check to keep the app window above other windows.
 - **Detection** Ã¢â‚¬â€ **Polling FPS**, **Cooldown min**, **Darken**, **Trigger**, **Yellow frac**, and **Red frac** control responsiveness and cooldown/glow sensitivity.
 - **Red glow threshold** Ã¢â‚¬â€ Tune **Red frac** if DoT-refresh slots are triggering too early or too late on red-glow windows.
+- **Per-slot detection region override** Ã¢â‚¬â€ In **Settings -> Detection**, use **Region by slot** with `slot:mode` pairs (example: `1:top_left, 4:full`) to override the global Region for specific slots.
 - **Per-slot glow sensitivity (advanced)** Ã¢â‚¬â€ In `config/default_config.json`, set `detection.glow_value_delta_by_slot` (example: `{"4": 55}`) to lower/raise glow brightness delta for one slot without changing others.
 - **Per-slot glow thresholds (advanced)** Ã¢â‚¬â€ Use `detection.glow_ring_fraction_by_slot` (example: `{"5": 0.08}`) and `detection.glow_override_cooldown_by_slot` (example: `[5]`) for proc-style icons that need lower yellow-fraction threshold and optional non-red glow cooldown override.
 - **Glow mode (advanced)** Ã¢â‚¬â€ In `config/default_config.json`, set `detection.glow_mode` to `"hybrid_motion"` to enable movement-aware glow confirmation (ring motion + rotational pattern + color score with cooldown/center-motion penalties).
