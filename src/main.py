@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 
 from PyQt6.QtCore import QRect, Qt, QThread, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QImage
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.automation.binds import normalize_bind
@@ -311,7 +311,7 @@ def _capture_plan_from_core(core, monitor_width: int, monitor_height: int) -> tu
 class ModuleCaptureWorker(QThread):
     """Capture loop: grab frame from core capture, emit preview, set_action_origin, process_frame."""
 
-    frame_captured = pyqtSignal(np.ndarray)
+    frame_captured = pyqtSignal(QImage)  # QImage crosses threads with QueuedConnection; np.ndarray does not
 
     def __init__(self, core, module_manager):
         super().__init__()
@@ -328,6 +328,14 @@ class ModuleCaptureWorker(QThread):
 
     def run(self) -> None:
         self._running = True
+        # #region agent log
+        try:
+            import time
+            with open(Path(__file__).resolve().parent.parent / "debug-6d0385.log", "a") as _f:
+                _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H3", "location": "main.py:ModuleCaptureWorker.run", "message": "Worker run() entered", "data": {"running": self._running}, "timestamp": int(time.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         core_cfg = self._core.get_config("core")
         monitor_index = int(core_cfg.get("monitor_index", 1))
         self._start_capture(monitor_index)
@@ -340,6 +348,7 @@ class ModuleCaptureWorker(QThread):
         interval = 1.0 / max(1, polling_fps)
         logger.info("Module capture worker started at %s FPS", polling_fps)
         cooldown_module = self._module_manager.get("cooldown_rotation")
+        _first_frame_logged = [False]
         try:
             while self._running:
                 try:
@@ -359,7 +368,21 @@ class ModuleCaptureWorker(QThread):
                     ax, ay = action_origin
                     if cooldown_module is not None and hasattr(cooldown_module, "set_action_origin"):
                         cooldown_module.set_action_origin(ax, ay)
-                    self.frame_captured.emit(frame)
+                    # Emit QImage so QueuedConnection can marshal it to the main thread (np.ndarray cannot)
+                    h, w, ch = frame.shape
+                    rgb = frame[:, :, ::-1].copy()
+                    qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+                    self.frame_captured.emit(qimg)
+                    if not _first_frame_logged[0]:
+                        _first_frame_logged[0] = True
+                        # #region agent log
+                        try:
+                            import time
+                            with open(Path(__file__).resolve().parent.parent / "debug-6d0385.log", "a") as _f:
+                                _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H3", "location": "main.py:ModuleCaptureWorker.run", "message": "First frame_captured emitted (QImage)", "data": {"w": w, "h": h}, "timestamp": int(time.time() * 1000)}) + "\n")
+                        except Exception:
+                            pass
+                        # #endregion
                     self._module_manager.process_frame(frame)
                 except Exception as e:
                     logger.error("Module capture error: %s", e, exc_info=True)
@@ -403,6 +426,14 @@ def main() -> None:
     config_manager = ConfigManager(CONFIG_PATH)
     config_manager.load_from_file()
     root = config_manager.get_root()
+    # #region agent log
+    try:
+        import time
+        with open(PROJECT_ROOT / "debug-6d0385.log", "a") as _f:
+            _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H1", "location": "main.py:main", "message": "After load_from_file", "data": {"root_keys": list(root.keys()), "core_keys": list((root.get("core") or {}).keys()), "has_cr": "cooldown_rotation" in root}, "timestamp": int(time.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
     core_cfg = root.get("core") or {}
     cr_cfg = root.get("cooldown_rotation") or {}
     flat = flatten_config(core_cfg, cr_cfg)

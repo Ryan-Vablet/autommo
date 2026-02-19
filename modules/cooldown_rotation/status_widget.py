@@ -73,13 +73,15 @@ class CooldownRotationStatusWidget(QWidget):
         self._preview_label = QLabel("No capture running")
         self._preview_label.setObjectName("previewLabel")
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setMinimumHeight(42)
+        self._preview_label.setMinimumSize(300, 42)
         self._preview_label.setStyleSheet(
             "background: #111; border-radius: 3px; color: #666; font-size: 11px;"
         )
         self._preview_label.setScaledContents(False)
+        self._preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         preview_inner.addWidget(self._preview_label)
         preview_frame.setMinimumHeight(96)
+        preview_frame.setMinimumWidth(320)
         layout.addWidget(preview_frame)
         # Slot states row
         self._slot_states_row = _SlotStatesRow(self)
@@ -135,20 +137,28 @@ class CooldownRotationStatusWidget(QWidget):
     def set_queued_override(self, q: Optional[dict]) -> None:
         self._queued_override = q
 
-    def update_preview(self, frame: np.ndarray) -> None:
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        rgb = frame[:, :, ::-1].copy()
-        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+    def update_preview(self, qimg: QImage) -> None:
+        if qimg.isNull():
+            return
+        w, h = qimg.width(), qimg.height()
         pixmap = QPixmap.fromImage(qimg)
-        max_w = max(1, self._preview_label.width() - 2 * PREVIEW_PADDING)
-        max_h = max(1, self._preview_label.height() - 2 * PREVIEW_PADDING)
+        # When label not yet laid out, width/height can be 0 and we'd scale to 1x1 (invisible)
+        max_w = self._preview_label.width() - 2 * PREVIEW_PADDING
+        max_h = self._preview_label.height() - 2 * PREVIEW_PADDING
+        if max_w < 50 or max_h < 20:
+            max_w = max(50, min(w, 500))
+            max_h = max(20, min(h, 80))
+        else:
+            max_w = max(1, max_w)
+            max_h = max(1, max_h)
         scaled = pixmap.scaled(
             max_w, max_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        self._preview_label.setText("")
         self._preview_label.setPixmap(scaled)
+        self._preview_label.update()
 
     def update_slot_states(self, states: list[dict]) -> None:
         if not states:
@@ -327,6 +337,20 @@ class CooldownRotationStatusWidget(QWidget):
         items = profile.get("priority_items", []) if isinstance(profile, dict) else []
         self._priority_panel.priority_list.set_items(items)
         self._last_action_history.set_max_rows(getattr(config, "history_rows", 3))
+        # Prepopulate slot state buttons from config so they appear before first frame
+        slot_count = getattr(config, "slot_count", 0) or 0
+        if slot_count > 0:
+            keybinds = getattr(config, "keybinds", []) or []
+            placeholder = [
+                {
+                    "index": i,
+                    "state": "unknown",
+                    "keybind": keybinds[i] if i < len(keybinds) else "?",
+                    "cooldown_remaining": None,
+                }
+                for i in range(slot_count)
+            ]
+            self.update_slot_states(placeholder)
 
     def _on_manual_item_action(self, action_id: str, action: str) -> None:
         """Stub for priority list context menu; persist via core in Phase 1."""

@@ -447,7 +447,20 @@ class MainWindow(QMainWindow):
 
     def _cooldown_status_widget(self) -> Optional[QWidget]:
         """First status widget (cooldown_rotation) for delegation. Main can also get from module_manager.get_status_widgets()."""
-        for name, widget in self._module_manager.get_status_widgets():
+        widgets = list(self._module_manager.get_status_widgets())
+        # #region agent log (log once per widget list state: empty vs first type)
+        if not hasattr(self, "_dbg_h2_logged"):
+            self._dbg_h2_logged = True
+            try:
+                import json, time
+                from pathlib import Path
+                _logpath = Path(__file__).resolve().parent.parent.parent / "debug-6d0385.log"
+                with open(_logpath, "a") as _f:
+                    _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H2", "location": "main_window.py:_cooldown_status_widget", "message": "get_status_widgets result (first call)", "data": {"count": len(widgets), "first_type": type(widgets[0][1]).__name__ if widgets else None, "has_update_preview": hasattr(widgets[0][1], "update_preview") if widgets else None}, "timestamp": int(time.time() * 1000)}) + "\n")
+            except Exception:
+                pass
+        # #endregion
+        for name, widget in widgets:
             return widget
         return None
 
@@ -575,7 +588,8 @@ class MainWindow(QMainWindow):
     def _update_automation_button_text(self) -> None:
         """Set toggle button to Enabled/Disabled (green/gray) and bind display to Toggle: [key]."""
         mod = self._module_manager.get("cooldown_rotation")
-        enabled = getattr(mod, "enabled", True) if mod else False
+        # Use automation state (_is_active), not module.enabled (module load flag)
+        enabled = getattr(mod, "_is_active", getattr(mod, "enabled", True)) if mod else False
         self._btn_automation_toggle.setProperty(
             "enabled", "true" if enabled else "false"
         )
@@ -671,10 +685,23 @@ class MainWindow(QMainWindow):
     def _update_next_intention_time(self) -> None:
         pass  # Handled by cooldown_rotation status widget
 
-    def update_preview(self, frame: np.ndarray) -> None:
+    def update_preview(self, qimg: QImage) -> None:
         w = self._cooldown_status_widget()
+        # #region agent log (first 3 calls only)
+        _h4_count = getattr(self, "_dbg_h4_count", 0)
+        if _h4_count < 3:
+            self._dbg_h4_count = _h4_count + 1
+            try:
+                import json, time
+                from pathlib import Path
+                _logpath = Path(__file__).resolve().parent.parent.parent / "debug-6d0385.log"
+                with open(_logpath, "a") as _f:
+                    _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H4", "location": "main_window.py:update_preview", "message": "Preview delegation", "data": {"widget_is_none": w is None, "has_update_preview": hasattr(w, "update_preview") if w else False, "qimg_valid": not qimg.isNull() if qimg else False, "call": _h4_count + 1}, "timestamp": int(time.time() * 1000)}) + "\n")
+            except Exception:
+                pass
+        # #endregion
         if w and hasattr(w, "update_preview"):
-            w.update_preview(frame)
+            w.update_preview(qimg)
 
     def _apply_slot_button_style(
         self,

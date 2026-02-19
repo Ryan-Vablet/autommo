@@ -47,6 +47,7 @@ class CooldownRotationModule(QObject, BaseModule, metaclass=_ModuleMeta):
         BaseModule.__init__(self)
         self._analyzer: Optional[SlotAnalyzer] = None
         self._queue_listener: Optional[QueueListener] = None
+        self._status_widget: Optional[Any] = None
         self._action_origin: tuple[int, int] = (0, 0)
         self._slot_states: list[dict] = []
         self._last_priority_order: list[int] = []
@@ -169,12 +170,14 @@ class CooldownRotationModule(QObject, BaseModule, metaclass=_ModuleMeta):
             return None
 
     def get_status_widget(self) -> Optional[Any]:
-        """Return status widget (preview, slots, last action, priority). Implemented in status_widget.py."""
+        """Return status widget (preview, slots, last action, priority). Same instance every time so main window updates the visible widget."""
         try:
             from modules.cooldown_rotation.status_widget import CooldownRotationStatusWidget
             if self.core is None:
                 return None
-            return CooldownRotationStatusWidget(self)
+            if self._status_widget is None:
+                self._status_widget = CooldownRotationStatusWidget(self)
+            return self._status_widget
         except ImportError:
             return None
 

@@ -20,8 +20,30 @@ class ConfigManager:
         if initial is not None:
             self._root = copy_nested(initial)
         else:
-            self._root = migrate_config({})
-            self._save_file()
+            # Do not overwrite existing config: load from file if present, else create defaults.
+            if self._path.exists():
+                try:
+                    with open(self._path) as f:
+                        data = json.load(f)
+                except Exception as e:
+                    logger.exception("Failed to load config from %s: %s", self._path, e)
+                    data = {}
+                if not data or "core" not in data:
+                    data = migrate_config(data)
+                    logger.info("Config migrated to namespaced format")
+                self._root = data
+                # #region agent log
+                try:
+                    import time
+                    _logpath = Path(__file__).resolve().parent.parent / "debug-6d0385.log"
+                    with open(_logpath, "a") as _f:
+                        _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H1", "location": "config_manager.py:__init__", "message": "ConfigManager loaded from file (no overwrite)", "data": {"path": str(self._path), "root_keys": list(self._root.keys()) if isinstance(self._root, dict) else []}, "timestamp": int(time.time() * 1000)}) + "\n")
+                except Exception:
+                    pass
+                # #endregion
+            else:
+                self._root = migrate_config({})
+                self._save_file()
 
     def get_config(self, module_key: str) -> dict[str, Any]:
         """Return a copy of the config section for the given key. Missing key returns {}."""
@@ -59,6 +81,15 @@ class ConfigManager:
                 data = {}
         else:
             data = {}
+        # #region agent log
+        try:
+            import time
+            _logpath = Path(__file__).resolve().parent.parent / "debug-6d0385.log"
+            with open(_logpath, "a") as _f:
+                _f.write(json.dumps({"sessionId": "6d0385", "hypothesisId": "H1", "location": "config_manager.py:load_from_file", "message": "After read", "data": {"path": str(self._path), "file_existed": self._path.exists(), "root_keys": list(data.keys()) if isinstance(data, dict) else [], "has_core": "core" in data if isinstance(data, dict) else False}, "timestamp": int(time.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if not data or "core" not in data:
             data = migrate_config(data)
             logger.info("Config migrated to namespaced format")
