@@ -79,18 +79,8 @@ class SlotButton(QPushButton):
         super().mouseReleaseEvent(event)
 
 
-def _format_countdown(seconds: Optional[float]) -> str:
-    """Format cooldown for display: no decimals, e.g. 12s or 1m."""
-    if seconds is None or seconds <= 0:
-        return "-"
-    secs = int(seconds)
-    if secs >= 60:
-        return f"{secs // 60}m"
-    return f"{secs}s"
-
-
 class PriorityItemWidget(QFrame):
-    """One row: handle + [key] + name + countdown. Draggable for reorder."""
+    """One row: rank + [key] + name (elided) + time since fired. Draggable for reorder."""
     remove_requested = pyqtSignal(str)
 
     def __init__(
@@ -118,32 +108,28 @@ class PriorityItemWidget(QFrame):
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
         self._buff_rois = [dict(r) for r in list(buff_rois or []) if isinstance(r, dict)]
         self._rank = rank
-        self._keybind = keybind
+        self._keybind = (keybind or "?").strip()
         self._display_name = display_name or "Unidentified"
         self._state = "unknown"
         self._cooldown_remaining: Optional[float] = None
         self._cast_progress: Optional[float] = None
         self._cast_ends_at: Optional[float] = None
+        self._last_fired_timestamp: Optional[float] = None
         self._drag_start: Optional[QPoint] = None
 
         self.setAcceptDrops(False)
         self.setObjectName("priorityItem")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 5, 6, 5)
         layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        self._handle_label = QLabel("\u28FF")
-        self._handle_label.setObjectName("priorityHandle")
-        layout.addWidget(self._handle_label)
-
-        self._rank_label = QLabel(str(rank))
-        self._rank_label.setObjectName("priorityRank")
-        self._rank_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._rank_label)
-
-        self._key_label = QLabel(f"[{keybind}]")
+        key_display = self._keybind.lower() if self._keybind else "?"
+        self._key_label = QLabel(f"[{key_display}]")
         self._key_label.setObjectName("priorityKey")
-        layout.addWidget(self._key_label)
+        self._key_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._key_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._name_label = QLabel(self._display_name)
         self._name_label.setObjectName("priorityName")
@@ -152,29 +138,24 @@ class PriorityItemWidget(QFrame):
         self._name_label.setMinimumWidth(0)
         self._name_label.setMinimumHeight(20)
         self._name_label.setWordWrap(False)
-        layout.addWidget(self._name_label, 1)
+        layout.addWidget(self._name_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self._rule_label = QLabel("")
-        self._rule_label.setMinimumWidth(28)
         self._rule_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._rule_label.setStyleSheet("font-family: monospace; font-size: 9px; color: #d3a75b;")
-        layout.addWidget(self._rule_label)
+        self._rule_label.setMaximumWidth(80)
+        layout.addWidget(self._rule_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._countdown_label = QLabel("-")
-        self._countdown_label.setMinimumWidth(32)
-        self._countdown_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._time_since_label = QLabel("-")
+        self._time_since_label.setObjectName("priorityTimeSince")
+        self._time_since_label.setMinimumWidth(28)
+        self._time_since_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         font = QFont("Consolas")
         if not font.exactMatch():
             font = QFont("Courier New")
         font.setPointSize(9)
-        self._countdown_label.setFont(font)
-        layout.addWidget(self._countdown_label)
-
-        self._remove_btn = QLabel("-")
-        self._remove_btn.setObjectName("priorityRemove")
-        self._remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._remove_btn.setToolTip("Remove from priority list")
-        layout.addWidget(self._remove_btn)
+        self._time_since_label.setFont(font)
+        layout.addWidget(self._time_since_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.setMinimumHeight(40)
         self.setFixedHeight(40)
@@ -183,6 +164,10 @@ class PriorityItemWidget(QFrame):
     @property
     def item_key(self) -> str:
         return self._item_key
+
+    @property
+    def keybind(self) -> str:
+        return self._keybind
 
     @property
     def item_type(self) -> str:
@@ -228,13 +213,26 @@ class PriorityItemWidget(QFrame):
             tokens.append(f"B-:{self._buff_name(self._buff_roi_id)}")
         self._rule_label.setText(" ".join(tokens))
 
+    def set_last_fired_timestamp(self, timestamp: Optional[float]) -> None:
+        self._last_fired_timestamp = timestamp
+        self._refresh_time_since_fired()
+
+    def _refresh_time_since_fired(self) -> None:
+        if self._last_fired_timestamp is None:
+            self._time_since_label.setText("-")
+            return
+        secs = int(time.time() - self._last_fired_timestamp)
+        if secs < 60:
+            self._time_since_label.setText(f"{secs}s")
+        else:
+            self._time_since_label.setText(f"{secs // 60}m")
+
     def set_rank(self, rank: int) -> None:
         self._rank = rank
-        self._rank_label.setText(str(rank))
 
     def set_keybind(self, keybind: str) -> None:
-        self._keybind = keybind
-        self._key_label.setText(f"[{keybind}]")
+        self._keybind = (keybind or "?").strip()
+        self._key_label.setText(f"[{self._keybind.lower()}]")
 
     def set_display_name(self, name: str) -> None:
         self._display_name = name or "Unidentified"
@@ -263,17 +261,6 @@ class PriorityItemWidget(QFrame):
         self._cooldown_remaining = cooldown_remaining
         self._cast_progress = cast_progress
         self._cast_ends_at = cast_ends_at
-        if state == "casting":
-            pct = int(round(max(0.0, min(1.0, cast_progress or 0.0)) * 100))
-            self._countdown_label.setText(f"{pct}%")
-        elif state == "channeling":
-            if cast_ends_at:
-                rem = max(0.0, cast_ends_at - time.time())
-                self._countdown_label.setText(f"{rem:.1f}s")
-            else:
-                self._countdown_label.setText("chan")
-        else:
-            self._countdown_label.setText(_format_countdown(cooldown_remaining))
         self._update_style()
 
     def _update_style(self) -> None:
@@ -296,16 +283,12 @@ class PriorityItemWidget(QFrame):
             "channeling": "#ffd37a",
             "locked": "#cccccc",
         }.get(self._state, "#ff8888")
-        self._key_label.setStyleSheet(f"color: {text_color};")
+        # Rank and key use theme white; name and time use state color
         self._name_label.setStyleSheet(f"color: {text_color};")
-        self._countdown_label.setStyleSheet(f"color: {text_color};")
+        self._time_since_label.setStyleSheet(f"color: {text_color};")
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._remove_btn.geometry().contains(event.position().toPoint()):
-                self.remove_requested.emit(self._item_key)
-                event.accept()
-                return
             self._drag_start = event.position().toPoint()
         super().mousePressEvent(event)
 
@@ -461,6 +444,11 @@ class PriorityListWidget(QWidget):
         self._buff_rois: list[dict] = []
         self._buff_states: dict[str, dict] = {}
         self._states_by_index: dict[int, tuple[str, Optional[float], Optional[float], Optional[float]]] = {}
+        self._last_fired_by_keybind: dict[str, float] = {}
+        self._time_since_timer = QTimer(self)
+        self._time_since_timer.setInterval(1000)
+        self._time_since_timer.timeout.connect(self._refresh_all_time_since_fired)
+        self._time_since_timer.start()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._scroll = QScrollArea()
@@ -537,6 +525,21 @@ class PriorityListWidget(QWidget):
 
     def get_items(self) -> list[dict]:
         return [dict(i) for i in self._items]
+
+    def set_last_fired_timestamps(self, keybind_to_timestamp: dict[str, float]) -> None:
+        self._last_fired_by_keybind = dict(keybind_to_timestamp or {})
+        self._apply_last_fired_to_widgets()
+
+    def _apply_last_fired_to_widgets(self) -> None:
+        by_key_lower = {k.strip().lower(): t for k, t in self._last_fired_by_keybind.items()}
+        for w in self._item_widgets:
+            key_lower = (w.keybind or "").strip().lower()
+            ts = by_key_lower.get(key_lower) if key_lower else None
+            w.set_last_fired_timestamp(ts)
+
+    def _refresh_all_time_since_fired(self) -> None:
+        for w in self._item_widgets:
+            w._refresh_time_since_fired()
 
     def update_states(self, states: list[dict]) -> None:
         by_index = {
@@ -619,6 +622,7 @@ class PriorityListWidget(QWidget):
             self._list_layout.insertWidget(self._list_layout.count() - 1, w)
             w.remove_requested.connect(self.remove_item_by_key)
             self._item_widgets.append(w)
+        self._apply_last_fired_to_widgets()
         self._apply_manual_item_states()
 
     def _item_by_key(self, item_key: str) -> Optional[dict]:
@@ -763,16 +767,26 @@ class PriorityPanel(QWidget):
         )
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self._list_name_label = QLabel("")
+        self._list_name_label.setStyleSheet(
+            "font-size: 11px; color: #aaa; font-style: italic;"
+        )
+        self._list_name_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        title_row.addWidget(self._list_name_label)
+        priority_inner.addLayout(title_row)
+
+        self._priority_list = PriorityListWidget(self)
+        priority_inner.addWidget(self._priority_list, 1)
+
         self._btn_add_manual = QPushButton("+ manual")
         self._btn_add_manual.setObjectName("priorityAddManual")
         self._btn_add_manual.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_manual.setToolTip("Add action not tied to a monitored slot")
         self._btn_add_manual.clicked.connect(self.add_manual_action_requested.emit)
-        title_row.addWidget(self._btn_add_manual)
-        priority_inner.addLayout(title_row)
+        priority_inner.addWidget(self._btn_add_manual, 0)
 
-        self._priority_list = PriorityListWidget(self)
-        priority_inner.addWidget(self._priority_list, 1)
         layout.addWidget(priority_frame, 1)
 
     @property
@@ -790,6 +804,11 @@ class PriorityPanel(QWidget):
     @property
     def priority_list(self) -> PriorityListWidget:
         return self._priority_list
+
+    def set_priority_list_name(self, name: str) -> None:
+        """Set the label shown in the header (current priority list / profile name)."""
+        self._list_name_label.setText(name or "")
+
 
     def update_last_action_sent(self, keybind: str, timestamp: float, display_name: str = "Unidentified") -> None:
         self._last_action_keybind = keybind

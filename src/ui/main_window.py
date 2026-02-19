@@ -239,6 +239,8 @@ class LastActionHistoryWidget(QWidget):
             []
         )  # (row, opacity_effect) — time is fixed per row
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        # Min height so rows can't collapse and overlap: (row_height * n) + (spacing * (n-1)) + top margin
+        self._update_min_height()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(4)
@@ -283,6 +285,7 @@ class LastActionHistoryWidget(QWidget):
                 self._placeholder_rows.append(ph)
                 self._rows_container.addWidget(ph)
         self._max_rows = n
+        self._update_min_height()
         for i, ph in enumerate(self._placeholder_rows):
             ph.setVisible(i >= len(self._entries))
         self._update_opacities()
@@ -312,6 +315,13 @@ class LastActionHistoryWidget(QWidget):
             if len(self._entries) < len(self._placeholder_rows):
                 self._placeholder_rows[len(self._entries)].show()
         self._update_opacities()
+
+    def _update_min_height(self) -> None:
+        """Set minimum height so rows cannot collapse and overlap (row 52px + 4px spacing between)."""
+        row_h = 52
+        spacing = 4
+        top_margin = 4
+        self.setMinimumHeight(top_margin + self._max_rows * row_h + max(0, self._max_rows - 1) * spacing)
 
     def _update_opacities(self) -> None:
         for i, (row, eff) in enumerate(self._entries):
@@ -357,6 +367,7 @@ class MainWindow(QMainWindow):
         self._last_action_sent_time: Optional[float] = (
             None  # for "time since last fire" on Next Intention + duration for new Last Action
         )
+        self._last_fired_by_keybind: dict[str, float] = {}  # keybind -> timestamp for priority list "Xs" display
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(580, 400)
         # Default height: fit full layout without main scrollbar (generous for DPI/fonts)
@@ -698,6 +709,7 @@ class MainWindow(QMainWindow):
         profile = self._active_priority_profile()
         profile_name = str(profile.get("name", "") or "").strip() or "Default"
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._set_priority_list_from_active_profile()
         self._update_bind_display()
         if persist:
@@ -715,6 +727,7 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
@@ -743,6 +756,7 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
@@ -926,6 +940,8 @@ class MainWindow(QMainWindow):
         self._last_action_sent_time = (
             timestamp  # reset only on send; Next Intention counter uses this
         )
+        self._last_fired_by_keybind[keybind] = timestamp
+        self._priority_panel.priority_list.set_last_fired_timestamps(self._last_fired_by_keybind)
         self._priority_panel.record_send_timestamp(timestamp)
 
     def set_next_intention_blocked(
