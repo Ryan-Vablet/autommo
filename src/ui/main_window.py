@@ -441,7 +441,10 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(module_scroll, 1)
 
     def _connect_signals(self) -> None:
-        pass  # Start/Settings/automation connected by main; module widgets own their signals
+        # Forward first status widget's calibrate_slot_requested so main.py's handler runs
+        w = self._first_status_widget()
+        if w is not None and hasattr(w, "calibrate_slot_requested"):
+            w.calibrate_slot_requested.connect(self.calibrate_slot_requested.emit)
 
     def _first_status_widget(self) -> Optional[QWidget]:
         """Get the first module status widget. Cached after first call."""

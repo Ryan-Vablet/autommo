@@ -6,12 +6,13 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFontMetrics, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor, QFontMetrics, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -33,6 +34,8 @@ PREVIEW_PADDING = 12
 
 class CooldownRotationStatusWidget(QWidget):
     """Preview, slot states, last action, next intention, priority list. Connect module signals with Qt.QueuedConnection."""
+
+    calibrate_slot_requested = pyqtSignal(int)  # slot_index; connect to main window so main.py can run calibration
 
     def __init__(self, module: Any, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -176,6 +179,7 @@ class CooldownRotationStatusWidget(QWidget):
                 btn.setStyleSheet(
                     "border: 1px solid #444; padding: 4px; font-family: monospace; font-size: 10px; font-weight: bold;"
                 )
+                btn.context_menu_requested.connect(self._show_slot_context_menu)
                 self._slot_buttons.append(btn)
             self._slot_states_row.set_buttons(self._slot_buttons)
         for btn, s in zip(self._slot_buttons, states):
@@ -248,13 +252,23 @@ class CooldownRotationStatusWidget(QWidget):
             f" background: {color}; color: #eee;"
         )
 
+    def _show_slot_context_menu(self, slot_index: int) -> None:
+        """Show right-click menu for a slot button (Calibrate This Slot, etc.)."""
+        menu = QMenu(self)
+        calibrate_action = menu.addAction("Calibrate This Slot")
+        chosen = menu.exec(QCursor.pos())
+        if chosen == calibrate_action:
+            self.calibrate_slot_requested.emit(slot_index)
+
     def _next_ready_priority_slot(self, states: list[dict]) -> Optional[int]:
         config = self._config()
         try:
             profile = config.get_active_priority_profile()
         except Exception:
             profile = {}
-        items = profile.get("priority_items", []) if isinstance(profile, dict) else []
+        if not isinstance(profile, dict):
+            profile = {}
+        items = profile.get("priority_items", []) or []
         order = profile.get("priority_order", []) if isinstance(profile, dict) else []
         by_idx = {s["index"]: s for s in states}
         for idx in order:
