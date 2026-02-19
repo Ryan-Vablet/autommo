@@ -696,16 +696,26 @@ class PriorityPanel(QWidget):
         )
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self._list_name_label = QLabel("")
+        self._list_name_label.setStyleSheet(
+            "font-size: 11px; color: #aaa; font-style: italic;"
+        )
+        self._list_name_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        title_row.addWidget(self._list_name_label)
+        priority_inner.addLayout(title_row)
+
+        self._priority_list = PriorityListWidget(self)
+        priority_inner.addWidget(self._priority_list, 1)
+
         self._btn_add_manual = QPushButton("+ manual")
         self._btn_add_manual.setObjectName("priorityAddManual")
         self._btn_add_manual.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_add_manual.setToolTip("Add action not tied to a monitored slot")
         self._btn_add_manual.clicked.connect(self.add_manual_action_requested.emit)
-        title_row.addWidget(self._btn_add_manual)
-        priority_inner.addLayout(title_row)
+        priority_inner.addWidget(self._btn_add_manual, 0)
 
-        self._priority_list = PriorityListWidget(self)
-        priority_inner.addWidget(self._priority_list, 1)
         layout.addWidget(priority_frame, 1)
 
     @property
@@ -723,6 +733,11 @@ class PriorityPanel(QWidget):
     @property
     def priority_list(self) -> PriorityListWidget:
         return self._priority_list
+
+    def set_priority_list_name(self, name: str) -> None:
+        """Set the label shown in the header (current priority list / profile name)."""
+        self._list_name_label.setText(name or "")
+
 
     def update_last_action_sent(self, keybind: str, timestamp: float, display_name: str = "Unidentified") -> None:
         self._last_action_keybind = keybind

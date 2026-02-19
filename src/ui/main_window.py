@@ -708,6 +708,7 @@ class MainWindow(QMainWindow):
         profile = self._active_priority_profile()
         profile_name = str(profile.get("name", "") or "").strip() or "Default"
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._set_priority_list_from_active_profile()
         self._update_bind_display()
         if persist:
@@ -725,6 +726,7 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
@@ -753,6 +755,7 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
+        self._priority_panel.set_priority_list_name(profile_name)
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
