@@ -340,12 +340,11 @@ def main() -> None:
         config.slot_baselines = config.slot_baselines_by_form.get("normal", [])
 
     def load_baselines_from_config(cfg: AppConfig) -> None:
-        """After a profile import, decode and push baselines into the analyzer."""
+        """After a profile import or reset, decode and push baselines into the analyzer."""
         try:
             decoded = decode_baselines_by_form(getattr(cfg, "slot_baselines_by_form", {}))
-            if decoded:
-                analyzer.set_baselines_by_form(decoded)
-                logger.info("Loaded imported baselines for %d forms", len(decoded))
+            analyzer.set_baselines_by_form(decoded)      # always set, clears if empty
+            logger.info("Loaded baselines for %d forms", len(decoded))
         except Exception as e:
             logger.warning("Could not load imported baselines: %s", e)
 

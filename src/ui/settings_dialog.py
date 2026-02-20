@@ -205,8 +205,10 @@ class SettingsDialog(QDialog):
         btn_row = QHBoxLayout()
         self._btn_export = QPushButton("Export")
         self._btn_import = QPushButton("Import")
+        self._btn_new = QPushButton("New")
         btn_row.addWidget(self._btn_export)
         btn_row.addWidget(self._btn_import)
+        btn_row.addWidget(self._btn_new)
         fl.addRow("", btn_row)
         return w
 
@@ -901,6 +903,7 @@ class SettingsDialog(QDialog):
         self._edit_profile_name.textChanged.connect(self._on_profile_changed)
         self._btn_export.clicked.connect(self._on_export)
         self._btn_import.clicked.connect(self._on_import)
+        self._btn_new.clicked.connect(self._on_new)
         self._monitor_combo.currentIndexChanged.connect(self._on_monitor_changed)
         self._check_overlay.toggled.connect(self._on_overlay_changed)
         self._check_always_on_top.toggled.connect(self._on_always_on_top_changed)
@@ -1443,6 +1446,30 @@ class SettingsDialog(QDialog):
             logger.info(f"Config imported from {path}")
         except Exception as e:
             logger.error(f"Import failed: {e}")
+
+    def _on_new(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Reset to Factory Defaults",
+            "This will reset ALL settings and calibrations to factory defaults.\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._config = AppConfig()
+        if self._after_import_callback:
+            self._after_import_callback(self._config)
+        self.sync_from_config()
+        self._emit_config()
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(self._config.to_dict(), f, indent=2)
+            logger.info("Config reset to factory defaults")
+        except Exception as e:
+            logger.error(f"Failed to save reset config: {e}")
 
     def _on_monitor_changed(self, index: int) -> None:
         if index < 0:
