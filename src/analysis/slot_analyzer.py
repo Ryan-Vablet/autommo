@@ -1443,14 +1443,22 @@ class SlotAnalyzer:
                     if raw_cooldown:
                         group_runtime.cooldown_release_candidate_started_at = None
                     else:
-                        if group_runtime.cooldown_release_candidate_started_at is None:
-                            group_runtime.cooldown_release_candidate_started_at = now
-                        if (
-                            now - group_runtime.cooldown_release_candidate_started_at
-                        ) < release_confirm_sec:
-                            raw_cooldown = True
-                        else:
+                        # Fast-path: pixels are clearly at baseline (well below release threshold),
+                        # so skip the debounce. This prevents the 260ms release-confirm from adding
+                        # latency when a GCD ends cleanly and the slot returns to its baseline state.
+                        clearly_ready = darkened_fraction < dark_release_thresh * 0.5
+                        if clearly_ready:
                             group_runtime.cooldown_release_candidate_started_at = None
+                            # raw_cooldown remains False → immediate release
+                        else:
+                            if group_runtime.cooldown_release_candidate_started_at is None:
+                                group_runtime.cooldown_release_candidate_started_at = now
+                            if (
+                                now - group_runtime.cooldown_release_candidate_started_at
+                            ) < release_confirm_sec:
+                                raw_cooldown = True
+                            else:
+                                group_runtime.cooldown_release_candidate_started_at = None
                 else:
                     group_runtime.cooldown_release_candidate_started_at = None
                 cooldown_groups_raw_seen[group_id] = cooldown_groups_raw_seen.get(
