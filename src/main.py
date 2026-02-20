@@ -339,10 +339,25 @@ def main() -> None:
         config.slot_baselines_by_form = encode_baselines_by_form(baselines_by_form)
         config.slot_baselines = config.slot_baselines_by_form.get("normal", [])
 
+    def load_baselines_from_config(cfg: AppConfig) -> None:
+        """After a profile import, decode and push baselines into the analyzer."""
+        try:
+            decoded = decode_baselines_by_form(getattr(cfg, "slot_baselines_by_form", {}))
+            if decoded:
+                analyzer.set_baselines_by_form(decoded)
+                logger.info("Loaded imported baselines for %d forms", len(decoded))
+        except Exception as e:
+            logger.warning("Could not load imported baselines: %s", e)
+
     window.set_before_save_callback(sync_baselines_to_config)
 
     # --- Settings dialog (single instance, non-modal; close = hide) ---
-    settings_dialog = SettingsDialog(config, before_save_callback=sync_baselines_to_config, parent=window)
+    settings_dialog = SettingsDialog(
+        config,
+        before_save_callback=sync_baselines_to_config,
+        after_import_callback=load_baselines_from_config,
+        parent=window,
+    )
 
     # Short-lived mss on main thread for monitor list and overlay setup
     capture = ScreenCapture(monitor_index=config.monitor_index)

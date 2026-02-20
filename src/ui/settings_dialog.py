@@ -99,11 +99,13 @@ class SettingsDialog(QDialog):
         self,
         config: AppConfig,
         before_save_callback: Optional[Callable[[], None]] = None,
+        after_import_callback: Optional[Callable[["AppConfig"], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._config = config
         self._before_save_callback = before_save_callback
+        self._after_import_callback = after_import_callback
         self._monitors: list[dict] = []
         self._capture_bind_thread: Optional[CaptureOneKeyThread] = None
         self._capture_bind_target: Optional[str] = None
@@ -1431,6 +1433,8 @@ class SettingsDialog(QDialog):
             with open(path) as f:
                 data = json.load(f)
             self._config = AppConfig.from_dict(data)
+            if self._after_import_callback:
+                self._after_import_callback(self._config)
             self.sync_from_config()
             self._emit_config()
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
