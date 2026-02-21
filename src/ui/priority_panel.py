@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 from src.automation.priority_rules import (
     manual_item_is_eligible,
     normalize_activation_rule,
+    normalize_required_form,
     normalize_ready_source,
 )
 
@@ -92,10 +93,13 @@ class PriorityItemWidget(QFrame):
         activation_rule: str,
         ready_source: str,
         buff_roi_id: str,
+        required_form: str,
         buff_rois: list[dict],
+        forms: list[dict],
         rank: int,
         keybind: str,
         display_name: str,
+        cast_does_not_block: bool = True,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -106,7 +110,10 @@ class PriorityItemWidget(QFrame):
         self._activation_rule = normalize_activation_rule(activation_rule)
         self._ready_source = normalize_ready_source(ready_source, item_type)
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
+        self._required_form = normalize_required_form(required_form)
+        self._cast_does_not_block = bool(cast_does_not_block)
         self._buff_rois = [dict(r) for r in list(buff_rois or []) if isinstance(r, dict)]
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
         self._rank = rank
         self._keybind = (keybind or "?").strip()
         self._display_name = display_name or "Unidentified"
@@ -198,12 +205,29 @@ class PriorityItemWidget(QFrame):
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
         self._update_rule_label()
 
+    def set_required_form(self, required_form: str) -> None:
+        self._required_form = normalize_required_form(required_form)
+        self._update_rule_label()
+
+    def set_forms(self, forms: list[dict]) -> None:
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
+        self._update_rule_label()
+
     def _buff_name(self, buff_id: str) -> str:
         bid = str(buff_id or "").strip().lower()
         for b in self._buff_rois:
             if str(b.get("id", "") or "").strip().lower() == bid:
                 return str(b.get("name", "") or "").strip() or bid
         return bid
+
+    def _form_name(self, form_id: str) -> str:
+        fid = str(form_id or "").strip().lower()
+        if not fid:
+            return "Any"
+        for f in self._forms:
+            if str(f.get("id", "") or "").strip().lower() == fid:
+                return str(f.get("name", "") or "").strip() or fid
+        return fid
 
     def _update_rule_label(self) -> None:
         tokens: list[str] = []
@@ -215,6 +239,8 @@ class PriorityItemWidget(QFrame):
             tokens.append(f"B+:{self._buff_name(self._buff_roi_id)}")
         elif self._ready_source == "buff_missing":
             tokens.append(f"B-:{self._buff_name(self._buff_roi_id)}")
+        if self._required_form:
+            tokens.append(f"F:{self._form_name(self._required_form)}")
         self._rule_label.setText(" ".join(tokens))
 
     def set_last_fired_timestamp(self, timestamp: Optional[float]) -> None:
@@ -331,7 +357,9 @@ class PriorityItemWidget(QFrame):
         require_glow_action = None
         ready_always_action = None
         slot_ready_action = None
+        cast_dnb_action = None
         ready_actions: dict[object, tuple[str, str]] = {}
+        form_actions: dict[object, str] = {}
         if self._item_type == "manual" and self._action_id:
             rename_action = menu.addAction("Rename...")
             rebind_action = menu.addAction("Rebind...")
@@ -357,6 +385,25 @@ class PriorityItemWidget(QFrame):
                     self._ready_source == "buff_missing" and self._buff_roi_id == buff_id
                 )
                 ready_actions[a_missing] = ("buff_missing", buff_id)
+            menu.addSeparator()
+            form_menu = menu.addMenu("Required Form")
+            a_any = form_menu.addAction("Any")
+            a_any.setCheckable(True)
+            a_any.setChecked(not self._required_form)
+            form_actions[a_any] = ""
+            for form in self._forms:
+                form_id = str(form.get("id", "") or "").strip().lower()
+                if not form_id:
+                    continue
+                form_name = str(form.get("name", "") or "").strip() or form_id
+                act = form_menu.addAction(form_name)
+                act.setCheckable(True)
+                act.setChecked(self._required_form == form_id)
+                form_actions[act] = form_id
+            menu.addSeparator()
+            cast_dnb_action = menu.addAction("Cast bar does not block")
+            cast_dnb_action.setCheckable(True)
+            cast_dnb_action.setChecked(self._cast_does_not_block)
             menu.addSeparator()
             remove_action = menu.addAction("Remove")
         elif self._item_type == "slot":
@@ -398,6 +445,25 @@ class PriorityItemWidget(QFrame):
                     self._ready_source == "buff_missing" and self._buff_roi_id == buff_id
                 )
                 ready_actions[a_missing] = ("buff_missing", buff_id)
+            menu.addSeparator()
+            form_menu = menu.addMenu("Required Form")
+            a_any = form_menu.addAction("Any")
+            a_any.setCheckable(True)
+            a_any.setChecked(not self._required_form)
+            form_actions[a_any] = ""
+            for form in self._forms:
+                form_id = str(form.get("id", "") or "").strip().lower()
+                if not form_id:
+                    continue
+                form_name = str(form.get("name", "") or "").strip() or form_id
+                act = form_menu.addAction(form_name)
+                act.setCheckable(True)
+                act.setChecked(self._required_form == form_id)
+                form_actions[act] = form_id
+            menu.addSeparator()
+            cast_dnb_action = menu.addAction("Cast bar does not block")
+            cast_dnb_action.setCheckable(True)
+            cast_dnb_action.setChecked(self._cast_does_not_block)
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
@@ -428,6 +494,12 @@ class PriorityItemWidget(QFrame):
         elif chosen in ready_actions:
             source, buff_id = ready_actions[chosen]
             parent._on_item_ready_source_changed(self._item_key, source, buff_id)
+        elif chosen in form_actions:
+            parent._on_item_required_form_changed(self._item_key, form_actions[chosen])
+        elif chosen == cast_dnb_action:
+            parent._on_item_cast_does_not_block_changed(
+                self._item_key, not self._cast_does_not_block
+            )
 
 
 class _DropForwardScrollArea(QScrollArea):
@@ -480,7 +552,9 @@ class PriorityListWidget(QWidget):
         self._display_names: list[str] = []
         self._manual_actions: list[dict] = []
         self._buff_rois: list[dict] = []
+        self._forms: list[dict] = []
         self._buff_states: dict[str, dict] = {}
+        self._active_form_id: str = "normal"
         self._states_by_index: dict[int, tuple[str, Optional[float], Optional[float], Optional[float]]] = {}
         self._last_fired_by_keybind: dict[str, float] = {}
         self._time_since_timer = QTimer(self)
@@ -532,6 +606,10 @@ class PriorityListWidget(QWidget):
         self._buff_rois = [dict(r) for r in list(rois or []) if isinstance(r, dict)]
         self._rebuild_items()
 
+    def set_forms(self, forms: list[dict]) -> None:
+        self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
+        self._rebuild_items()
+
     def set_buff_states(self, states: dict) -> None:
         self._buff_states = {
             str(k): dict(v) for k, v in dict(states or {}).items() if isinstance(v, dict)
@@ -557,6 +635,7 @@ class PriorityListWidget(QWidget):
                     out.get("ready_source"), "manual"
                 )
                 out["buff_roi_id"] = str(out.get("buff_roi_id", "") or "").strip().lower()
+            out["required_form"] = normalize_required_form(out.get("required_form"))
             normalized.append(out)
         self._items = normalized
         self._rebuild_items()
@@ -589,6 +668,9 @@ class PriorityListWidget(QWidget):
             )
             for s in states
         }
+        if states:
+            first = states[0]
+            self._active_form_id = str(first.get("active_form_id", self._active_form_id) or self._active_form_id).strip().lower() or "normal"
         self._states_by_index = by_index
         for w in self._item_widgets:
             if w.item_type == "slot" and isinstance(w.slot_index, int):
@@ -617,6 +699,8 @@ class PriorityListWidget(QWidget):
             activation_rule = normalize_activation_rule(item.get("activation_rule"))
             ready_source = normalize_ready_source(item.get("ready_source"), item_type)
             buff_roi_id = str(item.get("buff_roi_id", "") or "").strip().lower()
+            required_form = normalize_required_form(item.get("required_form"))
+            cast_does_not_block = bool(item.get("cast_does_not_block", True))
             if item_type == "slot" and isinstance(slot_index, int):
                 keybind = self._keybinds[slot_index] if slot_index < len(self._keybinds) else "?"
                 name = (
@@ -641,14 +725,19 @@ class PriorityListWidget(QWidget):
                 activation_rule,
                 ready_source,
                 buff_roi_id,
+                required_form,
                 self._buff_rois,
+                self._forms,
                 rank,
                 keybind or "?",
                 name,
-                self._list_container,
+                cast_does_not_block=cast_does_not_block,
+                parent=self._list_container,
             )
             w.set_activation_rule(activation_rule)
             w.set_ready_source(ready_source, buff_roi_id)
+            w.set_required_form(required_form)
+            w.set_forms(self._forms)
             if item_type == "slot" and isinstance(slot_index, int):
                 state, cd, cast_progress, cast_ends_at = self._states_by_index.get(
                     slot_index,
@@ -677,7 +766,11 @@ class PriorityListWidget(QWidget):
             if not isinstance(item, dict):
                 w.set_state("unknown", None, None, None)
                 continue
-            eligible = manual_item_is_eligible(item, buff_states=self._buff_states)
+            eligible = manual_item_is_eligible(
+                item,
+                buff_states=self._buff_states,
+                active_form_id=self._active_form_id,
+            )
             w.set_state("ready" if eligible else "on_cooldown", None, None, None)
 
     def _emit_items(self) -> None:
@@ -708,7 +801,12 @@ class PriorityListWidget(QWidget):
                 event.acceptProposedAction()
                 return
             self._items.append(
-                {"type": "slot", "slot_index": slot_index, "activation_rule": "always"}
+                {
+                    "type": "slot",
+                    "slot_index": slot_index,
+                    "activation_rule": "always",
+                    "required_form": "",
+                }
             )
             self._rebuild_items()
             self._emit_items()
@@ -769,6 +867,25 @@ class PriorityListWidget(QWidget):
             item_type = str(item.get("type", "") or "").strip().lower()
             item["ready_source"] = normalize_ready_source(ready_source, item_type)
             item["buff_roi_id"] = str(buff_roi_id or "").strip().lower()
+            self._rebuild_items()
+            self._emit_items()
+            return
+
+    def _on_item_required_form_changed(self, item_key: str, required_form: str) -> None:
+        normalized_form = normalize_required_form(required_form)
+        for item in self._items:
+            if self._item_key(item) != item_key:
+                continue
+            item["required_form"] = normalized_form
+            self._rebuild_items()
+            self._emit_items()
+            return
+
+    def _on_item_cast_does_not_block_changed(self, item_key: str, value: bool) -> None:
+        for item in self._items:
+            if self._item_key(item) != item_key:
+                continue
+            item["cast_does_not_block"] = bool(value)
             self._rebuild_items()
             self._emit_items()
             return
@@ -897,3 +1014,97 @@ class PriorityPanel(QWidget):
 
     def reset_gcd_estimate(self) -> None:
         self._send_timestamps.clear()
+
+
+class BuffStatusPanel(QWidget):
+    """Vertical list of buff detection status indicators, shown beside the priority panel."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("BUFFS")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
+        )
+        layout.addWidget(title)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._container = QWidget()
+        self._container_layout = QVBoxLayout(self._container)
+        self._container_layout.setContentsMargins(0, 0, 0, 0)
+        self._container_layout.setSpacing(3)
+        self._container_layout.addStretch()
+        self._scroll.setWidget(self._container)
+        layout.addWidget(self._scroll, 1)
+
+        self._rows: dict[str, QLabel] = {}
+        self._rois: list[dict] = []
+
+    def set_buff_rois(self, rois: list[dict]) -> None:
+        while self._container_layout.count() > 0:
+            item = self._container_layout.takeAt(0)
+            if item is not None and item.widget() is not None:
+                item.widget().deleteLater()
+        self._rows.clear()
+        self._rois = [dict(r) for r in (rois or []) if isinstance(r, dict)]
+
+        enabled_rois = [r for r in self._rois if r.get("enabled", True)]
+        if not enabled_rois:
+            self.setVisible(False)
+            return
+
+        for roi in enabled_rois:
+            roi_id = str(roi.get("id", "") or "").strip().lower()
+            if not roi_id:
+                continue
+            name = str(roi.get("name", "") or "").strip() or roi_id
+            label = QLabel(name)
+            label.setFixedHeight(26)
+            label.setObjectName("buffStatusRow")
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            label.setStyleSheet(self._row_style("#2a2a2a", "#777777", "#3a3a3a"))
+            self._container_layout.addWidget(label)
+            self._rows[roi_id] = label
+
+        self._container_layout.addStretch()
+        self.setVisible(True)
+
+    @staticmethod
+    def _row_style(bg: str, fg: str, border: str) -> str:
+        return (
+            f"QLabel#buffStatusRow {{"
+            f" background-color: {bg}; color: {fg};"
+            f" padding: 0 4px; border-radius: 3px; border: 1px solid {border};"
+            f" font-family: monospace; font-size: 10px;"
+            f" }}"
+        )
+
+    def update_buff_states(self, states: dict) -> None:
+        for buff_id, label in self._rows.items():
+            state = states.get(buff_id, {}) if isinstance(states, dict) else {}
+            if not isinstance(state, dict):
+                state = {}
+            status = str(state.get("status", "") or "")
+            present = bool(state.get("present", False))
+
+            if status == "ok" and present:
+                bg, fg, border = "#2d5a2d", "#88ff88", "#3d6a3d"
+            elif status == "ok" and not present:
+                bg, fg, border = "#5a2d2d", "#ff8888", "#6a3d3d"
+            elif status == "uncalibrated":
+                bg, fg, border = "#2a2a2a", "#777777", "#3a3a3a"
+            elif status in ("invalid-roi", "out-of-frame"):
+                bg, fg, border = "#5a4a1f", "#ffd37a", "#6a5a2f"
+            else:
+                bg, fg, border = "#2a2a2a", "#777777", "#3a3a3a"
+
+            label.setStyleSheet(self._row_style(bg, fg, border))

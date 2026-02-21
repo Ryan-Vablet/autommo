@@ -34,14 +34,17 @@ import numpy as np
 from src.models import AppConfig, BoundingBox
 from src.ui.priority_panel import (
     MIME_PRIORITY_ITEM,
+    BuffStatusPanel,
     PriorityPanel,
     SlotButton,
 )
 from src.automation.global_hotkey import format_bind_for_display
 from src.automation.binds import normalize_bind, normalize_bind_from_parts
 from src.automation.priority_rules import (
+    item_matches_form,
     manual_item_is_eligible,
     normalize_activation_rule,
+    normalize_required_form,
     normalize_ready_source,
     slot_item_is_eligible_for_state_dict,
 )
@@ -325,7 +328,9 @@ class LastActionHistoryWidget(QWidget):
         row_h = 52
         spacing = 4
         top_margin = 4
-        self.setMinimumHeight(top_margin + self._max_rows * row_h + max(0, self._max_rows - 1) * spacing)
+        self.setMinimumHeight(
+            top_margin + self._max_rows * row_h + max(0, self._max_rows - 1) * spacing
+        )
 
     def _update_opacities(self) -> None:
         for i, (row, eff) in enumerate(self._entries):
@@ -361,6 +366,7 @@ class MainWindow(QMainWindow):
         self._key_sender: Optional["KeySender"] = None
         self._queued_override: Optional[dict] = None
         self._buff_states: dict[str, dict] = {}
+        self._cast_gate_active: bool = False
         self._queue_listener: Optional[object] = None
         self._listening_slot_index: Optional[int] = None
         self._slots_recalibrated: set[int] = set(
@@ -371,7 +377,9 @@ class MainWindow(QMainWindow):
         self._last_action_sent_time: Optional[float] = (
             None  # for "time since last fire" on Next Intention + duration for new Last Action
         )
-        self._last_fired_by_keybind: dict[str, float] = {}  # keybind -> timestamp for priority list "Xs" display
+        self._last_fired_by_keybind: dict[str, float] = (
+            {}
+        )  # keybind -> timestamp for priority list "Xs" display
         self.setWindowTitle("Cooldown Reader")
         self.setMinimumSize(580, 400)
         # Default height: fit full layout without main scrollbar (generous for DPI/fonts)
@@ -396,8 +404,15 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().addPermanentWidget(self._gcd_label)
         self._cast_bar_debug_label = QLabel("Cast ROI: off")
-        self._cast_bar_debug_label.setStyleSheet("font-size: 10px; font-family: monospace; color: #666;")
+        self._cast_bar_debug_label.setStyleSheet(
+            "font-size: 10px; font-family: monospace; color: #666;"
+        )
         self.statusBar().addPermanentWidget(self._cast_bar_debug_label)
+        self._form_state_label = QLabel("Form: normal")
+        self._form_state_label.setStyleSheet(
+            "font-size: 10px; font-family: monospace; color: #666;"
+        )
+        self.statusBar().addPermanentWidget(self._form_state_label)
         self._next_intention_timer = QTimer(self)
         self._next_intention_timer.setInterval(100)
         self._next_intention_timer.timeout.connect(self._update_next_intention_time)
@@ -608,6 +623,10 @@ class MainWindow(QMainWindow):
         self._priority_panel = PriorityPanel(self)
         self._priority_panel.setFixedWidth(210)
         content_split.addWidget(self._priority_panel, 0)
+        self._buff_status_panel = BuffStatusPanel(self)
+        self._buff_status_panel.setFixedWidth(110)
+        self._buff_status_panel.setVisible(False)
+        content_split.addWidget(self._buff_status_panel, 0)
         self._left_panel.set_drop_remove_callback(self._on_priority_drop_remove)
 
         top_layout.addLayout(content_split, 1)
@@ -652,22 +671,35 @@ class MainWindow(QMainWindow):
                     out["ready_source"] = normalize_ready_source(
                         out.get("ready_source"), "slot"
                     )
-                    out["buff_roi_id"] = str(
-                        out.get("buff_roi_id", "") or ""
-                    ).strip().lower()
+                    out["buff_roi_id"] = (
+                        str(out.get("buff_roi_id", "") or "").strip().lower()
+                    )
                 elif str(out.get("type", "") or "").strip().lower() == "manual":
                     out["ready_source"] = normalize_ready_source(
                         out.get("ready_source"), "manual"
                     )
-                    out["buff_roi_id"] = str(
-                        out.get("buff_roi_id", "") or ""
-                    ).strip().lower()
+                    out["buff_roi_id"] = (
+                        str(out.get("buff_roi_id", "") or "").strip().lower()
+                    )
+                out["required_form"] = normalize_required_form(out.get("required_form"))
                 normalized.append(out)
             return normalized
         return [
-            {"type": "slot", "slot_index": i, "activation_rule": "always"}
+            {
+                "type": "slot",
+                "slot_index": i,
+                "activation_rule": "always",
+                "required_form": "",
+            }
             for i in self._active_priority_order()
         ]
+
+    def _active_form_id(self) -> str:
+        return (
+            str(getattr(self._config, "active_form_id", "normal") or "normal")
+            .strip()
+            .lower()
+        )
 
     def _active_manual_actions(self) -> list[dict]:
         profile = self._active_priority_profile()
@@ -692,6 +724,10 @@ class MainWindow(QMainWindow):
         try:
             self._priority_panel.priority_list.set_buff_rois(
                 getattr(self._config, "buff_rois", []) or []
+            )
+            self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
+            self._priority_panel.priority_list.set_forms(
+                getattr(self._config, "forms", []) or []
             )
             self._priority_panel.priority_list.set_manual_actions(
                 self._active_manual_actions()
@@ -731,13 +767,17 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
-        self._priority_panel.set_priority_list_name(profile_name)
+        self._form_state_label.setText(f"Form: {self._active_form_id()}")
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
         )
         self._priority_panel.priority_list.set_buff_rois(
             getattr(self._config, "buff_rois", []) or []
+        )
+        self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
+        self._priority_panel.priority_list.set_forms(
+            getattr(self._config, "forms", []) or []
         )
         self._priority_panel.priority_list.set_manual_actions(
             self._active_manual_actions()
@@ -760,13 +800,17 @@ class MainWindow(QMainWindow):
             or "Default"
         )
         self._profile_status_label.setText(f"Automation: {profile_name}")
-        self._priority_panel.set_priority_list_name(profile_name)
+        self._form_state_label.setText(f"Form: {self._active_form_id()}")
         self._priority_panel.priority_list.set_keybinds(self._config.keybinds)
         self._priority_panel.priority_list.set_display_names(
             getattr(self._config, "slot_display_names", [])
         )
         self._priority_panel.priority_list.set_buff_rois(
             getattr(self._config, "buff_rois", []) or []
+        )
+        self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
+        self._priority_panel.priority_list.set_forms(
+            getattr(self._config, "forms", []) or []
         )
         self._priority_panel.priority_list.set_manual_actions(
             self._active_manual_actions()
@@ -906,16 +950,17 @@ class MainWindow(QMainWindow):
                 out["ready_source"] = normalize_ready_source(
                     out.get("ready_source"), "slot"
                 )
-                out["buff_roi_id"] = str(
-                    out.get("buff_roi_id", "") or ""
-                ).strip().lower()
+                out["buff_roi_id"] = (
+                    str(out.get("buff_roi_id", "") or "").strip().lower()
+                )
             elif str(out.get("type", "") or "").strip().lower() == "manual":
                 out["ready_source"] = normalize_ready_source(
                     out.get("ready_source"), "manual"
                 )
-                out["buff_roi_id"] = str(
-                    out.get("buff_roi_id", "") or ""
-                ).strip().lower()
+                out["buff_roi_id"] = (
+                    str(out.get("buff_roi_id", "") or "").strip().lower()
+                )
+            out["required_form"] = normalize_required_form(out.get("required_form"))
             normalized_items.append(out)
         slot_order = self._slot_order_from_priority_items(normalized_items)
         profile["priority_items"] = normalized_items
@@ -945,7 +990,9 @@ class MainWindow(QMainWindow):
             timestamp  # reset only on send; Next Intention counter uses this
         )
         self._last_fired_by_keybind[keybind] = timestamp
-        self._priority_panel.priority_list.set_last_fired_timestamps(self._last_fired_by_keybind)
+        self._priority_panel.priority_list.set_last_fired_timestamps(
+            self._last_fired_by_keybind
+        )
         self._priority_panel.record_send_timestamp(timestamp)
 
     def set_next_intention_blocked(
@@ -982,7 +1029,7 @@ class MainWindow(QMainWindow):
             remaining = max(0.0, cast_ends_at - time.time())
             status = f"waiting: casting ({remaining:.1f}s)"
         else:
-            status = "waiting: channeling"
+            status = "waiting: casting"
         self._next_intention_row.set_content("…", name, status, KEY_BLUE)
 
     def _on_priority_drop_remove(self, item_key: str) -> None:
@@ -1081,7 +1128,10 @@ class MainWindow(QMainWindow):
                     continue
                 slot = by_index.get(slot_index)
                 if not slot_item_is_eligible_for_state_dict(
-                    item, slot, buff_states=self._buff_states
+                    item,
+                    slot,
+                    buff_states=self._buff_states,
+                    active_form_id=self._active_form_id(),
                 ):
                     continue
                 keybind = (
@@ -1101,7 +1151,11 @@ class MainWindow(QMainWindow):
                     "display_name": name,
                 }
             if item_type == "manual":
-                if not manual_item_is_eligible(item, buff_states=self._buff_states):
+                if not manual_item_is_eligible(
+                    item,
+                    buff_states=self._buff_states,
+                    active_form_id=self._active_form_id(),
+                ):
                     continue
                 action_id = str(item.get("action_id", "") or "").strip().lower()
                 action = manual_by_id.get(action_id)
@@ -1125,6 +1179,8 @@ class MainWindow(QMainWindow):
         """First slot in priority order currently casting/channeling and its cast_ends_at."""
         by_index = {s["index"]: s for s in states}
         for item in self._active_priority_items():
+            if not item_matches_form(item, self._active_form_id()):
+                continue
             if str(item.get("type", "") or "").strip().lower() != "slot":
                 continue
             slot_index = item.get("slot_index")
@@ -1148,20 +1204,35 @@ class MainWindow(QMainWindow):
                 continue
             slot = by_index.get(slot_index)
             if slot_item_is_eligible_for_state_dict(
-                item, slot, buff_states=self._buff_states
+                item,
+                slot,
+                buff_states=self._buff_states,
+                active_form_id=self._active_form_id(),
             ):
                 return slot_index
         return None
+
+    def update_form_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        active_form_id = str(state.get("active_form_id", "") or "").strip().lower()
+        if active_form_id:
+            self._config.active_form_id = active_form_id
+            settling = bool(state.get("settling", False))
+            suffix = " (settling)" if settling else ""
+            self._form_state_label.setText(f"Form: {active_form_id}{suffix}")
 
     def update_buff_states(self, states: dict) -> None:
         if not isinstance(states, dict):
             self._buff_states = {}
             self._priority_panel.priority_list.set_buff_states({})
+            self._buff_status_panel.update_buff_states({})
             return
         self._buff_states = {
             str(k): dict(v) for k, v in states.items() if isinstance(v, dict)
         }
         self._priority_panel.priority_list.set_buff_states(self._buff_states)
+        self._buff_status_panel.update_buff_states(self._buff_states)
 
     def _show_slot_menu(self, slot_index: int) -> None:
         """Show context menu: Bind Key, Calibrate This Slot, Rename (identify skill)."""
@@ -1170,8 +1241,9 @@ class MainWindow(QMainWindow):
         btn = self._slot_buttons[slot_index]
         menu = QMenu(self)
         menu.addAction("Bind Key", lambda: self._start_listening_for_key(slot_index))
+        form_id = self._active_form_id()
         menu.addAction(
-            "Calibrate This Slot",
+            f"Calibrate This Slot ({form_id})",
             lambda: self.calibrate_slot_requested.emit(slot_index),
         )
         menu.addAction("Rename...", lambda: self._rename_slot(slot_index))
@@ -1244,7 +1316,12 @@ class MainWindow(QMainWindow):
         ]
         if not items:
             items = [
-                {"type": "slot", "slot_index": i, "activation_rule": "always"}
+                {
+                    "type": "slot",
+                    "slot_index": i,
+                    "activation_rule": "always",
+                    "required_form": "",
+                }
                 for i in list(profile.get("priority_order", []))
             ]
         items.append(
@@ -1253,6 +1330,7 @@ class MainWindow(QMainWindow):
                 "action_id": action_id,
                 "ready_source": "always",
                 "buff_roi_id": "",
+                "required_form": "",
             }
         )
         profile["priority_items"] = items
@@ -1499,9 +1577,11 @@ class MainWindow(QMainWindow):
             )
             self._next_intention_row.set_content(keybind, slot_name, suffix, KEY_CYAN)
             return
-        casting_slot, cast_ends_at = self._next_casting_priority_slot(states)
-        if casting_slot is not None:
-            self.set_next_intention_casting_wait(casting_slot, cast_ends_at)
+        allow_while_casting = bool(
+            getattr(self._config, "allow_cast_while_casting", False)
+        )
+        if self._cast_gate_active and not allow_while_casting:
+            self.set_next_intention_casting_wait(slot_index=None, cast_ends_at=None)
             return
         next_slot = self._next_ready_priority_slot(states)
         if next_slot is not None:
@@ -1518,7 +1598,10 @@ class MainWindow(QMainWindow):
             if not self._config.automation_enabled:
                 suffix = "ready (paused)"
                 color = KEY_YELLOW
-            elif self._key_sender is None or not self._key_sender.is_target_window_active():
+            elif (
+                self._key_sender is None
+                or not self._key_sender.is_target_window_active()
+            ):
                 suffix = "ready (window)"
                 color = KEY_YELLOW
             else:
@@ -1587,10 +1670,12 @@ class MainWindow(QMainWindow):
         present = bool(debug.get("present", False))
         directional = bool(debug.get("directional", False))
         front = float(debug.get("front", 0.0) or 0.0)
+        direction = str(debug.get("direction", "?") or "?")
         gate_active = bool(debug.get("gate_active", False))
+        self._cast_gate_active = gate_active
         self._cast_bar_debug_label.setText(
             f"Cast ROI: {status} | m {motion:.1f} a {activity:.1f}/{threshold:.1f}->{deactivate_threshold:.1f} | "
-            f"p {'Y' if present else 'N'} d {'Y' if directional else 'N'} f {front:.2f} | "
+            f"p {'Y' if present else 'N'} d {'Y' if directional else 'N'} f {front:.2f} ({direction}) | "
             f"{'ON' if active else 'OFF'} gate {'ON' if gate_active else 'OFF'}"
         )
         if status in ("off", "invalid-roi", "out-of-frame", "no-bar"):
@@ -1612,4 +1697,3 @@ class MainWindow(QMainWindow):
     def _on_settings_clicked(self) -> None:
         """No-op; main.py connects _btn_settings to settings_dialog.show_or_raise."""
         pass
-

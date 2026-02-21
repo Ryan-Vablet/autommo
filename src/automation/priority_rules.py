@@ -21,6 +21,17 @@ def normalize_ready_source(raw_source: object, item_type: str) -> str:
     return "always" if item_type == "manual" else "slot"
 
 
+def normalize_required_form(raw_required_form: object) -> str:
+    return str(raw_required_form or "").strip().lower()
+
+
+def item_matches_form(item: dict, active_form_id: str) -> bool:
+    required_form = normalize_required_form(item.get("required_form"))
+    if not required_form:
+        return True
+    return required_form == str(active_form_id or "").strip().lower()
+
+
 def dot_refresh_eligible(yellow_glow_ready: bool, red_glow_ready: bool) -> bool:
     """DoT refresh eligibility: no glow OR red glow (yellow-only blocks)."""
     return (not yellow_glow_ready and not red_glow_ready) or red_glow_ready
@@ -103,7 +114,10 @@ def slot_item_is_eligible_for_snapshot(
     item: dict,
     slot: Optional[SlotSnapshot],
     buff_states: Optional[dict[str, Any]] = None,
+    active_form_id: str = "",
 ) -> bool:
+    if not item_matches_form(item, active_form_id):
+        return False
     if slot is None:
         return False
     ready_source = normalize_ready_source(item.get("ready_source"), "slot")
@@ -141,7 +155,10 @@ def slot_item_is_eligible_for_state_dict(
     item: dict,
     slot_state: Optional[dict[str, Any]],
     buff_states: Optional[dict[str, Any]] = None,
+    active_form_id: str = "",
 ) -> bool:
+    if not item_matches_form(item, active_form_id):
+        return False
     if not isinstance(slot_state, dict):
         return False
     ready_source = normalize_ready_source(item.get("ready_source"), "slot")
@@ -175,5 +192,11 @@ def slot_item_is_eligible_for_state_dict(
     return _activation_allows(item, glow_ready, yellow_glow_ready, red_glow_ready)
 
 
-def manual_item_is_eligible(item: dict, buff_states: Optional[dict[str, Any]] = None) -> bool:
+def manual_item_is_eligible(
+    item: dict,
+    buff_states: Optional[dict[str, Any]] = None,
+    active_form_id: str = "",
+) -> bool:
+    if not item_matches_form(item, active_form_id):
+        return False
     return _buff_ready(item, buff_states, "manual")

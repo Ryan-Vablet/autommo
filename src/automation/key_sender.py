@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from src.models import AppConfig
 
-from src.models import ActionBarState, SlotState
+from src.models import ActionBarState
 from src.automation.binds import normalize_bind
 from src.automation.priority_rules import (
+    item_matches_form,
     manual_item_is_eligible,
     slot_item_is_eligible_for_snapshot,
 )
@@ -57,6 +58,7 @@ class KeySender:
         # After sending a queued key, don't send priority key until this time (so game gets only the queued key).
         self._suppress_priority_until = 0.0
         self._single_fire_pending = False
+        self._last_sent_item: Optional[dict] = None
 
     def update_config(self, config: "AppConfig") -> None:
         self._config = config
@@ -71,14 +73,11 @@ class KeySender:
             getattr(self._config, "target_window_title", "") or ""
         )
 
-    def _find_blocking_cast(
+    def _blocking_cast_state(
         self, state: ActionBarState
-    ) -> Optional[tuple[int, object]]:
-        """Return first slot currently casting/channeling, if any."""
-        for slot in state.slots:
-            if slot.state in (SlotState.CASTING, SlotState.CHANNELING):
-                return slot.index, slot
-        return None
+    ) -> tuple[bool, Optional[float]]:
+        """Return global cast-bar gate state and optional end timestamp."""
+        return bool(getattr(state, "cast_active", False)), getattr(state, "cast_ends_at", None)
 
     def evaluate_and_send(
         self,
@@ -111,27 +110,31 @@ class KeySender:
             getattr(self._config, "allow_cast_while_casting", False)
         )
         if not allow_while_casting:
-            blocking = self._find_blocking_cast(state)
-            if blocking is not None:
-                blocking_index, blocking_slot = blocking
-                queue_window_sec = (
-                    getattr(self._config, "queue_window_ms", 120) or 120
-                ) / 1000.0
-                cast_ends_at = getattr(blocking_slot, "cast_ends_at", None)
-                if cast_ends_at is None or now < (cast_ends_at + queue_window_sec):
-                    return {
-                        "action": "blocked",
-                        "reason": "casting",
-                        "slot_index": blocking_index,
-                        "cast_ends_at": cast_ends_at,
-                    }
+            cast_active, cast_ends_at = self._blocking_cast_state(state)
+            if cast_active:
+                last_item_dnb = bool(
+                    (self._last_sent_item or {}).get("cast_does_not_block", False)
+                )
+                if not last_item_dnb:
+                    queue_window_sec = (
+                        getattr(self._config, "queue_window_ms", 120) or 120
+                    ) / 1000.0
+                    if cast_ends_at is None or now < (cast_ends_at + queue_window_sec):
+                        return {
+                            "action": "blocked",
+                            "reason": "casting",
+                            "slot_index": None,
+                            "cast_ends_at": cast_ends_at,
+                        }
 
         slots_by_index = {s.index: s for s in state.slots}
+        active_form_id = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower()
         # Queued key fires only when at least one slot-type priority item is READY
         # (used as a practical "GCD over" signal).
         any_priority_ready = any(
             (
                 isinstance(item, dict)
+                and item_matches_form(item, active_form_id)
                 and str(item.get("type", "") or "").strip().lower() == "slot"
                 and isinstance(item.get("slot_index"), int)
                 and (slots_by_index.get(item["slot_index"]) is not None)
@@ -245,12 +248,16 @@ class KeySender:
                     continue
                 slot = slots_by_index.get(slot_index)
                 if not slot_item_is_eligible_for_snapshot(
-                    item, slot, buff_states=buff_states
+                    item, slot, buff_states=buff_states, active_form_id=active_form_id
                 ):
                     continue
                 keybind = keybinds[slot_index] if slot_index < len(keybinds) else None
             elif item_type == "manual":
-                if not manual_item_is_eligible(item, buff_states=buff_states):
+                if not manual_item_is_eligible(
+                    item,
+                    buff_states=buff_states,
+                    active_form_id=active_form_id,
+                ):
                     continue
                 action_id = str(item.get("action_id", "") or "").strip().lower()
                 if not action_id:
@@ -290,6 +297,7 @@ class KeySender:
                 return None
 
             self._last_send_time = now
+            self._last_sent_item = item
             if single_fire_pending:
                 self._single_fire_pending = False
             logger.info("Sent key: %s", keybind)
