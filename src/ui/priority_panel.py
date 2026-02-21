@@ -99,6 +99,7 @@ class PriorityItemWidget(QFrame):
         rank: int,
         keybind: str,
         display_name: str,
+        cast_does_not_block: bool = True,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -110,6 +111,7 @@ class PriorityItemWidget(QFrame):
         self._ready_source = normalize_ready_source(ready_source, item_type)
         self._buff_roi_id = str(buff_roi_id or "").strip().lower()
         self._required_form = normalize_required_form(required_form)
+        self._cast_does_not_block = bool(cast_does_not_block)
         self._buff_rois = [dict(r) for r in list(buff_rois or []) if isinstance(r, dict)]
         self._forms = [dict(f) for f in list(forms or []) if isinstance(f, dict)]
         self._rank = rank
@@ -355,6 +357,7 @@ class PriorityItemWidget(QFrame):
         require_glow_action = None
         ready_always_action = None
         slot_ready_action = None
+        cast_dnb_action = None
         ready_actions: dict[object, tuple[str, str]] = {}
         form_actions: dict[object, str] = {}
         if self._item_type == "manual" and self._action_id:
@@ -397,6 +400,10 @@ class PriorityItemWidget(QFrame):
                 act.setCheckable(True)
                 act.setChecked(self._required_form == form_id)
                 form_actions[act] = form_id
+            menu.addSeparator()
+            cast_dnb_action = menu.addAction("Cast bar does not block")
+            cast_dnb_action.setCheckable(True)
+            cast_dnb_action.setChecked(self._cast_does_not_block)
             menu.addSeparator()
             remove_action = menu.addAction("Remove")
         elif self._item_type == "slot":
@@ -453,6 +460,10 @@ class PriorityItemWidget(QFrame):
                 act.setCheckable(True)
                 act.setChecked(self._required_form == form_id)
                 form_actions[act] = form_id
+            menu.addSeparator()
+            cast_dnb_action = menu.addAction("Cast bar does not block")
+            cast_dnb_action.setCheckable(True)
+            cast_dnb_action.setChecked(self._cast_does_not_block)
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
@@ -485,6 +496,10 @@ class PriorityItemWidget(QFrame):
             parent._on_item_ready_source_changed(self._item_key, source, buff_id)
         elif chosen in form_actions:
             parent._on_item_required_form_changed(self._item_key, form_actions[chosen])
+        elif chosen == cast_dnb_action:
+            parent._on_item_cast_does_not_block_changed(
+                self._item_key, not self._cast_does_not_block
+            )
 
 
 class _DropForwardScrollArea(QScrollArea):
@@ -685,6 +700,7 @@ class PriorityListWidget(QWidget):
             ready_source = normalize_ready_source(item.get("ready_source"), item_type)
             buff_roi_id = str(item.get("buff_roi_id", "") or "").strip().lower()
             required_form = normalize_required_form(item.get("required_form"))
+            cast_does_not_block = bool(item.get("cast_does_not_block", True))
             if item_type == "slot" and isinstance(slot_index, int):
                 keybind = self._keybinds[slot_index] if slot_index < len(self._keybinds) else "?"
                 name = (
@@ -715,7 +731,8 @@ class PriorityListWidget(QWidget):
                 rank,
                 keybind or "?",
                 name,
-                self._list_container,
+                cast_does_not_block=cast_does_not_block,
+                parent=self._list_container,
             )
             w.set_activation_rule(activation_rule)
             w.set_ready_source(ready_source, buff_roi_id)
@@ -864,6 +881,15 @@ class PriorityListWidget(QWidget):
             self._emit_items()
             return
 
+    def _on_item_cast_does_not_block_changed(self, item_key: str, value: bool) -> None:
+        for item in self._items:
+            if self._item_key(item) != item_key:
+                continue
+            item["cast_does_not_block"] = bool(value)
+            self._rebuild_items()
+            self._emit_items()
+            return
+
 
 class PriorityPanel(QWidget):
     """Right-side panel: priority list only (Last Action and Next Intention are in main window left column)."""
@@ -988,3 +1014,97 @@ class PriorityPanel(QWidget):
 
     def reset_gcd_estimate(self) -> None:
         self._send_timestamps.clear()
+
+
+class BuffStatusPanel(QWidget):
+    """Vertical list of buff detection status indicators, shown beside the priority panel."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("BUFFS")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            "font-family: monospace; font-size: 10px; color: #666; font-weight: bold; letter-spacing: 1.5px;"
+        )
+        layout.addWidget(title)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._container = QWidget()
+        self._container_layout = QVBoxLayout(self._container)
+        self._container_layout.setContentsMargins(0, 0, 0, 0)
+        self._container_layout.setSpacing(3)
+        self._container_layout.addStretch()
+        self._scroll.setWidget(self._container)
+        layout.addWidget(self._scroll, 1)
+
+        self._rows: dict[str, QLabel] = {}
+        self._rois: list[dict] = []
+
+    def set_buff_rois(self, rois: list[dict]) -> None:
+        while self._container_layout.count() > 0:
+            item = self._container_layout.takeAt(0)
+            if item is not None and item.widget() is not None:
+                item.widget().deleteLater()
+        self._rows.clear()
+        self._rois = [dict(r) for r in (rois or []) if isinstance(r, dict)]
+
+        enabled_rois = [r for r in self._rois if r.get("enabled", True)]
+        if not enabled_rois:
+            self.setVisible(False)
+            return
+
+        for roi in enabled_rois:
+            roi_id = str(roi.get("id", "") or "").strip().lower()
+            if not roi_id:
+                continue
+            name = str(roi.get("name", "") or "").strip() or roi_id
+            label = QLabel(name)
+            label.setFixedHeight(26)
+            label.setObjectName("buffStatusRow")
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            label.setStyleSheet(self._row_style("#2a2a2a", "#777777", "#3a3a3a"))
+            self._container_layout.addWidget(label)
+            self._rows[roi_id] = label
+
+        self._container_layout.addStretch()
+        self.setVisible(True)
+
+    @staticmethod
+    def _row_style(bg: str, fg: str, border: str) -> str:
+        return (
+            f"QLabel#buffStatusRow {{"
+            f" background-color: {bg}; color: {fg};"
+            f" padding: 0 4px; border-radius: 3px; border: 1px solid {border};"
+            f" font-family: monospace; font-size: 10px;"
+            f" }}"
+        )
+
+    def update_buff_states(self, states: dict) -> None:
+        for buff_id, label in self._rows.items():
+            state = states.get(buff_id, {}) if isinstance(states, dict) else {}
+            if not isinstance(state, dict):
+                state = {}
+            status = str(state.get("status", "") or "")
+            present = bool(state.get("present", False))
+
+            if status == "ok" and present:
+                bg, fg, border = "#2d5a2d", "#88ff88", "#3d6a3d"
+            elif status == "ok" and not present:
+                bg, fg, border = "#5a2d2d", "#ff8888", "#6a3d3d"
+            elif status == "uncalibrated":
+                bg, fg, border = "#2a2a2a", "#777777", "#3a3a3a"
+            elif status in ("invalid-roi", "out-of-frame"):
+                bg, fg, border = "#5a4a1f", "#ffd37a", "#6a5a2f"
+            else:
+                bg, fg, border = "#2a2a2a", "#777777", "#3a3a3a"
+
+            label.setStyleSheet(self._row_style(bg, fg, border))

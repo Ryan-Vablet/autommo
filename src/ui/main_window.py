@@ -34,6 +34,7 @@ import numpy as np
 from src.models import AppConfig, BoundingBox
 from src.ui.priority_panel import (
     MIME_PRIORITY_ITEM,
+    BuffStatusPanel,
     PriorityPanel,
     SlotButton,
 )
@@ -622,6 +623,10 @@ class MainWindow(QMainWindow):
         self._priority_panel = PriorityPanel(self)
         self._priority_panel.setFixedWidth(210)
         content_split.addWidget(self._priority_panel, 0)
+        self._buff_status_panel = BuffStatusPanel(self)
+        self._buff_status_panel.setFixedWidth(110)
+        self._buff_status_panel.setVisible(False)
+        content_split.addWidget(self._buff_status_panel, 0)
         self._left_panel.set_drop_remove_callback(self._on_priority_drop_remove)
 
         top_layout.addLayout(content_split, 1)
@@ -720,6 +725,7 @@ class MainWindow(QMainWindow):
             self._priority_panel.priority_list.set_buff_rois(
                 getattr(self._config, "buff_rois", []) or []
             )
+            self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
             self._priority_panel.priority_list.set_forms(
                 getattr(self._config, "forms", []) or []
             )
@@ -769,6 +775,7 @@ class MainWindow(QMainWindow):
         self._priority_panel.priority_list.set_buff_rois(
             getattr(self._config, "buff_rois", []) or []
         )
+        self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
         self._priority_panel.priority_list.set_forms(
             getattr(self._config, "forms", []) or []
         )
@@ -801,6 +808,7 @@ class MainWindow(QMainWindow):
         self._priority_panel.priority_list.set_buff_rois(
             getattr(self._config, "buff_rois", []) or []
         )
+        self._buff_status_panel.set_buff_rois(getattr(self._config, "buff_rois", []) or [])
         self._priority_panel.priority_list.set_forms(
             getattr(self._config, "forms", []) or []
         )
@@ -1218,11 +1226,13 @@ class MainWindow(QMainWindow):
         if not isinstance(states, dict):
             self._buff_states = {}
             self._priority_panel.priority_list.set_buff_states({})
+            self._buff_status_panel.update_buff_states({})
             return
         self._buff_states = {
             str(k): dict(v) for k, v in states.items() if isinstance(v, dict)
         }
         self._priority_panel.priority_list.set_buff_states(self._buff_states)
+        self._buff_status_panel.update_buff_states(self._buff_states)
 
     def _show_slot_menu(self, slot_index: int) -> None:
         """Show context menu: Bind Key, Calibrate This Slot, Rename (identify skill)."""

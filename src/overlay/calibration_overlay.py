@@ -337,6 +337,8 @@ class CalibrationOverlay(QWidget):
             calibrated = bool(state.get("calibrated", False))
             status = str(state.get("status", "ok") or "ok").strip().lower()
             similarity = float(state.get("present_similarity", 0.0) or 0.0)
+            motion_score = float(state.get("motion_score", 0.0) or 0.0)
+            motion_gate = float(state.get("motion_gate_threshold", 0.0) or 0.0)
             red_ready = bool(state.get("red_glow_ready", False))
             red_candidate = bool(state.get("red_glow_candidate", False))
             color = QColor("#35D07F") if present else QColor("#FF884D")
@@ -349,10 +351,11 @@ class CalibrationOverlay(QWidget):
             if not calibrated:
                 tag = "U"
             red_tag = "R" if red_ready else ("r" if red_candidate else ".")
+            motion_part = f" M{motion_score:.1f}" if motion_gate > 0 else ""
             painter.drawText(
                 rect.left() + 2,
                 rect.top() - 4 if rect.top() > 10 else rect.bottom() + 12,
-                f"BUFF {name}: {tag} {red_tag} {status} S{similarity:.2f}",
+                f"BUFF {name}: {tag} {red_tag} {status} S{similarity:.2f}{motion_part}",
             )
 
         detector = self._form_detector if isinstance(self._form_detector, dict) else {}

@@ -431,6 +431,7 @@ class AppConfig:
                         "ready_source": "slot",
                         "buff_roi_id": "",
                         "required_form": "",
+                        "cast_does_not_block": True,
                     }
                 )
                 continue
@@ -457,6 +458,7 @@ class AppConfig:
                                 raw.get("required_form"),
                                 form_ids,
                             ),
+                            "cast_does_not_block": bool(raw.get("cast_does_not_block", True)),
                         }
                     )
             elif itype == "manual":
@@ -476,6 +478,7 @@ class AppConfig:
                                 raw.get("required_form"),
                                 form_ids,
                             ),
+                            "cast_does_not_block": bool(raw.get("cast_does_not_block", True)),
                         }
                     )
         if normalized:
@@ -488,6 +491,7 @@ class AppConfig:
                 "ready_source": "slot",
                 "buff_roi_id": "",
                 "required_form": "",
+                "cast_does_not_block": True,
             }
             for i in list(fallback_order or [])
             if isinstance(i, int)

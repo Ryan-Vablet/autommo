@@ -58,6 +58,7 @@ class KeySender:
         # After sending a queued key, don't send priority key until this time (so game gets only the queued key).
         self._suppress_priority_until = 0.0
         self._single_fire_pending = False
+        self._last_sent_item: Optional[dict] = None
 
     def update_config(self, config: "AppConfig") -> None:
         self._config = config
@@ -111,16 +112,20 @@ class KeySender:
         if not allow_while_casting:
             cast_active, cast_ends_at = self._blocking_cast_state(state)
             if cast_active:
-                queue_window_sec = (
-                    getattr(self._config, "queue_window_ms", 120) or 120
-                ) / 1000.0
-                if cast_ends_at is None or now < (cast_ends_at + queue_window_sec):
-                    return {
-                        "action": "blocked",
-                        "reason": "casting",
-                        "slot_index": None,
-                        "cast_ends_at": cast_ends_at,
-                    }
+                last_item_dnb = bool(
+                    (self._last_sent_item or {}).get("cast_does_not_block", False)
+                )
+                if not last_item_dnb:
+                    queue_window_sec = (
+                        getattr(self._config, "queue_window_ms", 120) or 120
+                    ) / 1000.0
+                    if cast_ends_at is None or now < (cast_ends_at + queue_window_sec):
+                        return {
+                            "action": "blocked",
+                            "reason": "casting",
+                            "slot_index": None,
+                            "cast_ends_at": cast_ends_at,
+                        }
 
         slots_by_index = {s.index: s for s in state.slots}
         active_form_id = str(getattr(self._config, "active_form_id", "normal") or "normal").strip().lower()
@@ -292,6 +297,7 @@ class KeySender:
                 return None
 
             self._last_send_time = now
+            self._last_sent_item = item
             if single_fire_pending:
                 self._single_fire_pending = False
             logger.info("Sent key: %s", keybind)

@@ -52,6 +52,8 @@ class _BuffRuntime:
 
     candidate_frames: int = 0
     red_glow_candidate_frames: int = 0
+    prev_buff_gray: Optional[np.ndarray] = None
+    motion_score: float = 0.0
 
 
 @dataclass
@@ -991,15 +993,19 @@ class SlotAnalyzer:
         diff = cv2.absdiff(gray_roi, gray_template)
         diff_score = max(0.0, 1.0 - (float(np.mean(diff)) / 255.0))
 
-        # Add normalized correlation so global grayscale similarity alone
-        # does not mark unrelated ROIs as "present" at low thresholds.
         roi_std = float(np.std(gray_roi))
         template_std = float(np.std(gray_template))
         if roi_std < 1e-6 or template_std < 1e-6:
+            # Flat region (e.g. solid-colour resource bar): structural correlation
+            # is undefined; pixel-level diff is the only meaningful metric.
             return diff_score
+
         corr = cv2.matchTemplate(gray_roi, gray_template, cv2.TM_CCOEFF_NORMED)
         corr_raw = float(corr[0, 0]) if corr.size else -1.0
-        corr_score = max(0.0, min(1.0, (corr_raw + 1.0) * 0.5))
+        corr_score = max(0.0, corr_raw)
+        # Require BOTH pixel-level similarity AND structural pattern match.
+        # Using max(0, corr_raw) is stricter than the old (corr_raw+1)/2
+        # normalization, which gave uncorrelated backgrounds a baseline of 0.5.
         return min(diff_score, corr_score)
 
     def _analyze_buffs(self, frame: np.ndarray, action_origin: tuple[int, int]) -> None:
@@ -1067,8 +1073,34 @@ class SlotAnalyzer:
                 else:
                     roi = frame[y1:y2, x1:x2]
                     roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    present_similarity = self._template_similarity(roi_gray, present_t)
-                    candidate = present_similarity >= threshold
+
+                    # Motion gate: high frame-to-frame delta → dynamic background
+                    # → call absent immediately without running template matching.
+                    motion_gate_threshold = float(
+                        raw.get("motion_gate_threshold", 0) or 0
+                    )
+                    if motion_gate_threshold > 0 and runtime.prev_buff_gray is not None:
+                        prev = runtime.prev_buff_gray
+                        if prev.shape == roi_gray.shape:
+                            runtime.motion_score = float(
+                                np.mean(cv2.absdiff(roi_gray, prev))
+                            )
+                        else:
+                            runtime.motion_score = 0.0
+                    else:
+                        runtime.motion_score = 0.0
+                    runtime.prev_buff_gray = roi_gray
+
+                    motion_gated = (
+                        motion_gate_threshold > 0
+                        and runtime.motion_score > motion_gate_threshold
+                    )
+                    if motion_gated:
+                        present_similarity = 0.0
+                        candidate = False
+                    else:
+                        present_similarity = self._template_similarity(roi_gray, present_t)
+                        candidate = present_similarity >= threshold
                     if candidate:
                         runtime.candidate_frames += 1
                     else:
@@ -1123,6 +1155,10 @@ class SlotAnalyzer:
                 "red_glow_candidate_frames": int(runtime.red_glow_candidate_frames),
                 "red_glow_fraction": float(red_glow_fraction),
                 "red_glow_ready": bool(red_glow_ready),
+                "motion_score": float(runtime.motion_score),
+                "motion_gate_threshold": float(
+                    raw.get("motion_gate_threshold", 0) or 0
+                ),
             }
         self._buff_states = states
 

@@ -635,7 +635,7 @@ class SettingsDialog(QDialog):
         fl.addRow(_row_label("Buff rect:"), buff_geom_row)
         buff_detect_row = QHBoxLayout()
         self._spin_buff_match_threshold = QSpinBox()
-        self._spin_buff_match_threshold.setRange(50, 100)
+        self._spin_buff_match_threshold.setRange(0, 100)
         self._spin_buff_match_threshold.setPrefix("T ")
         self._spin_buff_match_threshold.setSuffix("%")
         self._spin_buff_match_threshold.setMaximumWidth(86)
@@ -643,8 +643,18 @@ class SettingsDialog(QDialog):
         self._spin_buff_confirm_frames.setRange(1, 10)
         self._spin_buff_confirm_frames.setPrefix("N ")
         self._spin_buff_confirm_frames.setMaximumWidth(64)
+        self._spin_buff_motion_gate = QSpinBox()
+        self._spin_buff_motion_gate.setRange(0, 50)
+        self._spin_buff_motion_gate.setPrefix("G ")
+        self._spin_buff_motion_gate.setSpecialValueText("off")
+        self._spin_buff_motion_gate.setToolTip(
+            "Motion gate: mean pixel delta threshold (0 = off). "
+            "Set to ~10 to skip template matching when the ROI is moving (game world background)."
+        )
+        self._spin_buff_motion_gate.setMaximumWidth(74)
         buff_detect_row.addWidget(self._spin_buff_match_threshold)
         buff_detect_row.addWidget(self._spin_buff_confirm_frames)
+        buff_detect_row.addWidget(self._spin_buff_motion_gate)
         buff_detect_row.addStretch()
         fl.addRow(_row_label("Buff detect:"), buff_detect_row)
         buff_cal_row = QHBoxLayout()
@@ -912,6 +922,7 @@ class SettingsDialog(QDialog):
         self._spin_buff_height.valueChanged.connect(self._on_detection_changed)
         self._spin_buff_match_threshold.valueChanged.connect(self._on_detection_changed)
         self._spin_buff_confirm_frames.valueChanged.connect(self._on_detection_changed)
+        self._spin_buff_motion_gate.valueChanged.connect(self._on_detection_changed)
         self._btn_calibrate_buff_present.clicked.connect(self._on_calibrate_buff_present_clicked)
         self._btn_clear_buff_templates.clicked.connect(self._on_clear_buff_templates_clicked)
         self._combo_form.currentIndexChanged.connect(self._on_form_selected)
@@ -1825,6 +1836,7 @@ class SettingsDialog(QDialog):
             self._spin_buff_height,
             self._spin_buff_match_threshold,
             self._spin_buff_confirm_frames,
+            self._spin_buff_motion_gate,
             self._btn_calibrate_buff_present,
             self._btn_clear_buff_templates,
         ):
@@ -1838,6 +1850,7 @@ class SettingsDialog(QDialog):
             self._spin_buff_height.setValue(0)
             self._spin_buff_match_threshold.setValue(88)
             self._spin_buff_confirm_frames.setValue(2)
+            self._spin_buff_motion_gate.setValue(0)
             self._buff_calibration_status.setText("No buff ROI")
             return
         roi = rois[selected_idx]
@@ -1849,6 +1862,7 @@ class SettingsDialog(QDialog):
         self._spin_buff_height.blockSignals(True)
         self._spin_buff_match_threshold.blockSignals(True)
         self._spin_buff_confirm_frames.blockSignals(True)
+        self._spin_buff_motion_gate.blockSignals(True)
         self._edit_buff_roi_name.setText(str(roi.get("name", "") or "").strip())
         self._check_buff_roi_enabled.setChecked(bool(roi.get("enabled", True)))
         self._spin_buff_left.setValue(int(roi.get("left", 0)))
@@ -1859,6 +1873,7 @@ class SettingsDialog(QDialog):
             int(round(float(roi.get("match_threshold", 0.88)) * 100))
         )
         self._spin_buff_confirm_frames.setValue(int(roi.get("confirm_frames", 2)))
+        self._spin_buff_motion_gate.setValue(int(roi.get("motion_gate_threshold", 0) or 0))
         calibration = roi.get("calibration", {})
         if not isinstance(calibration, dict):
             calibration = {}
@@ -1875,6 +1890,7 @@ class SettingsDialog(QDialog):
         self._spin_buff_height.blockSignals(False)
         self._spin_buff_match_threshold.blockSignals(False)
         self._spin_buff_confirm_frames.blockSignals(False)
+        self._spin_buff_motion_gate.blockSignals(False)
 
     def _on_buff_roi_selected(self, _index: int) -> None:
         self._sync_buff_roi_controls()
@@ -1897,6 +1913,7 @@ class SettingsDialog(QDialog):
                 "height": 48,
                 "match_threshold": 0.88,
                 "confirm_frames": 2,
+                "motion_gate_threshold": 0,
                 "calibration": {"present_template": None},
             }
         )
@@ -2018,6 +2035,7 @@ class SettingsDialog(QDialog):
             roi["height"] = self._spin_buff_height.value()
             roi["match_threshold"] = self._spin_buff_match_threshold.value() / 100.0
             roi["confirm_frames"] = self._spin_buff_confirm_frames.value()
+            roi["motion_gate_threshold"] = self._spin_buff_motion_gate.value()
             calibration = roi.get("calibration", {})
             if not isinstance(calibration, dict):
                 calibration = {}
